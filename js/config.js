@@ -169,7 +169,9 @@ function rangeLabel(r) {
   const o = { month: "short", year: "numeric" };
   const a = r.from.toLocaleDateString("de-DE", o);
   const b = r.to.toLocaleDateString("de-DE", o);
-  return a === b ? a : `${a} – ${b}`;
+  if (a === b) return a;
+  if (r.from.getFullYear() === r.to.getFullYear()) return `${r.from.toLocaleDateString("de-DE", { month: "short" })} – ${b}`;
+  return `${a} – ${b}`;
 }
 
 /* ---------- Demo-Rollen (simulieren Berechtigungen, keine echte Anmeldung) ---------- */

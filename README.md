@@ -8,10 +8,10 @@ Das Dashboard beantwortet auf der Startseite drei Fragen: **Was läuft gut? Wo g
 
 | Bereich | Inhalt |
 | --- | --- |
-| Übersicht | 4 Kennzahlen mit Vergleichszeitraum, Kacheln „Das läuft gut“, „Verbesserungspotenziale“, „Services mit Aufmerksamkeitsbedarf“, Zeitverlauf, Sterneverteilung, bewertete Aspekte. Kacheln lassen sich verschieben und in der Größe ändern. |
-| Bewertungen | Strukturierte Antworten (Sterne, Zustimmungsskalen) mit Bereichsfilter nach Sternen und Antwortkategorie, Einzelbewertungen |
-| Textfeedback | Offene Kommentare (Kritik/Lob), Themenbündelung per Stichwortliste, Suche |
-| Services | Servicevergleich je Dienststelle (Ø Sterne + Fallzahl auf einheitlicher Skala) |
+| Übersicht | Feste Standardansicht: Gesamtzufriedenheit mit Sterneverteilung, positive Bewertungen, „Anliegen erledigt“, Verlauf; darunter „Das läuft gut“, „Verbesserungspotenzial“, „Aufmerksamkeit nötig“ |
+| Bewertungsübersicht | Sterne und fünf Detailbewertungen als Säulen. Ein Klick auf Balken oder Säule filtert. Von hier gelangt man zu den Einzelbewertungen (eigene Seite). |
+| Textfeedback | Lob und Kritik nebeneinander mit gemeinsamer Filterleiste (Sterne, Suche) |
+| Services | Ø Sterne je Service als Balken (Skala 0–5), gegliedert nach Dienststellen |
 | Daten & Methodik | Datenquelle, Definitionen, Zuordnungen, CSV-Import und -Export |
 
 Technik: statisches HTML/CSS/JavaScript ohne Build-Schritt.

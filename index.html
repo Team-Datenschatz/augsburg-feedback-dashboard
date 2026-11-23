@@ -7,12 +7,12 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=6" />
+  <link rel="stylesheet" href="css/style.css?v=7" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23165a32'/><text x='16' y='22' text-anchor='middle' font-size='16' fill='white' font-family='serif'>A</text></svg>" />
 </head>
 <body>
   <a class="skip-link" href="#view-root">Zum Inhalt springen</a>
-  <div class="demo-banner" role="note"><strong>Prototyp · Beispieldaten.</strong> Zahlen, Bewertungen und Texte sind fiktiv erzeugt, sofern keine eigene Datei geladen wurde. Kein offizielles Angebot der Stadt.</div>
+  <div class="demo-banner" role="note"><strong>Prototyp mit fiktiven Beispieldaten</strong> – kein offizielles Angebot der Stadt Augsburg.</div>
   <div class="app">
     <aside class="sidebar">
       <div class="brand"><a href="#/start" title="Zur Übersicht (Startseite)"><img src="img/logo-gruen.png" alt="Stadt Augsburg – zur Übersicht" width="188" height="58" /></a></div>
@@ -24,7 +24,7 @@
         </a>
         <a class="nav-item" data-view="bewertungen" href="#/bewertungen">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="12 3 15 9 21.5 9.8 16.8 14.4 18.2 21 12 17.6 5.8 21 7.2 14.4 2.5 9.8 9 9"/></svg>
-          <span>Bewertungen</span>
+          <span>Bewertungs&shy;übersicht</span>
         </a>
         <a class="nav-item" data-view="textfeedback" href="#/textfeedback">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 6h14v10H8l-3 3z"/></svg>
@@ -43,8 +43,7 @@
       <div class="demo-role">
         <label for="demo-role"><span class="demo-tag">DEMO</span> Rolle simulieren</label>
         <select id="demo-role"></select>
-        <p>Simuliert Zugriffsrechte – keine echte Anmeldung. Getrennt von den Ansichtsfiltern.</p>
-        <p class="data-source">Daten: <span id="data-source"></span></p>
+        <p>Simuliert Zugriffsrechte, keine echte Anmeldung.</p>
       </div>
 
       <div class="skyline" aria-hidden="true">
@@ -59,7 +58,6 @@
         <div class="title-block">
           <a class="mobile-logo-link" href="#/start"><img class="mobile-logo" src="img/logo-gruen.png" alt="Stadt Augsburg – zur Übersicht" width="150" height="46" /></a>
           <h1>Bürgerfeedback Online-Services</h1>
-          <p>Rückmeldungen nach der Nutzung städtischer Online-Services</p>
         </div>
         <div class="filters" role="group" aria-label="Globale Filter">
           <label class="filter">
@@ -83,19 +81,18 @@
             </span>
             <select id="filter-service"></select>
           </label>
+          <button type="button" class="btn-link reset-filters" id="reset-filters" hidden>Filter zurücksetzen</button>
           <div class="updated">
             Datenstand<br /><strong id="updated-at"></strong>
           </div>
           <button class="icon-btn" id="info-btn" title="Hinweise zur Nutzung" aria-label="Hinweise zur Nutzung">i</button>
         </div>
       </header>
-      <div class="active-filters" id="active-filters" aria-live="polite"></div>
 
       <main id="view-root" tabindex="-1"></main>
 
       <footer class="hint">
-        <span class="info-dot" aria-hidden="true">i</span>
-        <span>Freiwillige Rückmeldungen nach Nutzung der Online-Services. Die Ergebnisse sind nicht repräsentativ für alle Augsburger Bürgerinnen und Bürger; Zusammenhänge sind keine nachgewiesenen Ursachen.</span>
+        Freiwilliges Feedback nach Nutzung – nicht repräsentativ für alle Augsburger Bürgerinnen und Bürger.
       </footer>
     </div>
   </div>
@@ -112,9 +109,9 @@
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <div class="sr-only" id="sr-status" role="status" aria-live="polite"></div>
 
-  <script src="js/config.js?v=6"></script>
-  <script src="js/data.js?v=6"></script>
-  <script src="js/metrics.js?v=6"></script>
-  <script src="js/app.js?v=6"></script>
+  <script src="js/config.js?v=7"></script>
+  <script src="js/data.js?v=7"></script>
+  <script src="js/metrics.js?v=7"></script>
+  <script src="js/app.js?v=7"></script>
 </body>
 </html>

@@ -3,133 +3,175 @@
 const { chromium } = require('playwright');
 const SP = process.argv[2] || require('os').tmpdir();
 const results = [];
-const check = (name, ok, info = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${info ? ' – ' + info : ''}`);
+const check = (name, ok, info = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name}${info && !ok ? ' – ' + info : ''}`);
+
 (async () => {
   const b = await chromium.launch();
-  const p = await b.newPage({ viewport: { width: 1440, height: 2800 } });
+  const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
   const errs = [];
-  p.on('pageerror', e => errs.push(e.message));
+  p.on('pageerror', (e) => errs.push(e.message));
   const U = 'http://localhost:8080/';
   const wait = (ms = 150) => p.waitForTimeout(ms);
-  await p.goto(U + '#/bewertungen');
+  const go = async (h) => { await p.goto(U + h); await p.reload(); await wait(200); };
+  const url = () => decodeURIComponent(p.url());
 
-  // 1. Dienststelle/Service
+  // Ticket 1/2/3: Startseite – wichtigste Ergebnisse ohne Scrollen, eine Kachel für positive Bewertungen
+  await go('#/start');
+  const inFold = async (sel) => p.$eval(sel, (el) => { const r = el.getBoundingClientRect(); return r.top >= 0 && r.bottom <= window.innerHeight; });
+  check('T1: Gesamtzufriedenheit ohne Scrollen sichtbar', await inFold('.card-hero'));
+  check('T1: Kennzahlen ohne Scrollen sichtbar', await inFold('.kpi-stack'));
+  check('T1: Verlauf ohne Scrollen sichtbar', await inFold('.card-trend'));
+  check('T1: Ergebnis-Kacheln ohne Scrollen sichtbar', await inFold('.insights'));
+  const titles = await p.$$eval('.card-title', (t) => t.map((x) => x.textContent.trim()));
+  check('T2: Kachel „Positive Bewertungen“ vorhanden', titles.includes('Positive Bewertungen'));
+  check('T2: Keine separate Kachel „Kritische Bewertungen“', !titles.some((t) => /Kritische/.test(t)), titles.join('|'));
+  const bars = await p.$$eval('.card-hero .sb-row', (r) => r.map((x) => x.querySelector('.sb-label').textContent.trim()));
+  check('T3: Horizontale Verteilung 5 ★ bis 1 ★', bars.join() === '5 ★,4 ★,3 ★,2 ★,1 ★', bars.join());
+  const pcts = await p.$$eval('.card-hero .sb-val b', (v) => v.map((x) => parseInt(x.textContent)));
+  const pos = parseInt(await p.textContent('.kpi-primary .big-value'));
+  check('T3/T7: Verteilung ergibt 100 %, Positiv = 5 ★ + 4 ★', pcts.reduce((a, c) => a + c, 0) === 100 && pos === pcts[0] + pcts[1], `${pcts} / ${pos}`);
+  check('T3: Anzahl Bewertungen kompakt angegeben', /\d[\d.]* Bewertungen/.test(await p.textContent('.card-hero .star-summary')));
+  check('T7: Keine Kategorie „ohne Angabe“ in der Verteilung', !(await p.innerText('.card-hero .star-bars')).includes('ohne Angabe'));
+  await go('#/start?dienststelle=Standesamt');
+  const nStand = await p.textContent('.card-hero .star-summary .muted');
+  await go('#/start');
+  const nAll = await p.textContent('.card-hero .star-summary .muted');
+  check('T3: Verteilung berücksichtigt aktive Filter', nStand !== nAll);
+
+  // Ticket 4: keine Layoutanpassung
+  check('T4: Keine Bedienelemente zur Layoutanpassung', (await p.$$('[data-action^="tile"], [data-action="toggle-customize"], [draggable="true"]')).length === 0);
+
+  // Ticket 5: kurze Überschriften, Info-Element per Klick und Tastatur
+  const eyebrows = await p.$$('.eyebrow');
+  check('T5: Keine doppelten Überschriften („Was läuft gut?“)', eyebrows.length === 0 && !(await p.textContent('#view-root')).includes('Was läuft gut?'));
+  const infoBtn = await p.$('.card-hero .info-btn');
+  await infoBtn.click(); await wait(80);
+  const popId = await infoBtn.getAttribute('aria-controls');
+  check('T5: Info-Element öffnet per Klick', await p.isVisible('#' + popId));
+  await p.keyboard.press('Escape'); await wait(80);
+  check('T5: Info-Element schließt per Escape, Fokus bleibt', (await p.isHidden('#' + popId)) && (await p.evaluate(() => document.activeElement.classList.contains('info-btn'))));
+  await infoBtn.focus(); await p.keyboard.press('Enter'); await wait(80);
+  check('T5: Info-Element per Tastatur (Enter) bedienbar', await p.isVisible('#' + popId));
+  await p.keyboard.press('Escape');
+  check('T5: Zeitraum und N kompakt sichtbar', /N = [\d.]+/.test(await p.textContent('.context')));
+
+  // Ticket 6: Bezeichnung
+  const navLabel = (await p.textContent('.nav-item[data-view="bewertungen"] span')).replace(/\u00AD/g, '').trim();
+  await go('#/bewertungen');
+  const heading = (await p.textContent('.page-title')).trim();
+  check('T6: Navigation und Überschrift „Bewertungsübersicht“', navLabel === 'Bewertungsübersicht' && heading === 'Bewertungsübersicht', `${navLabel} / ${heading}`);
+
+  // Ticket 8: Detailbewertungen als 5 Säulen
+  const aspectCols = await p.$$eval('.aspect', (a) => a.map((x) => x.querySelectorAll('.acol').length));
+  check('T8: 5 Aspekte mit je 5 Säulen', aspectCols.length === 5 && aspectCols.every((n) => n === 5), aspectCols.join());
+  const labels = await p.$$eval('.aspect:nth-child(2) .acol-label', (l) => l.map((x) => x.textContent.trim()));
+  check('T8: Säulen beschriftet', labels.length === 5 && labels.every(Boolean), labels.join('|'));
+  check('T8: Keine kumulierten Seitenbalken mehr', (await p.$$('.stack')).length === 0);
+  check('T7: Keine Kategorie „ohne Angabe“ in der Bewertungsübersicht', !(await p.innerText('.ratings-grid')).includes('ohne Angabe'));
+  const aspectPct = await p.$$eval('.aspect', (a) => a.map((x) => [...x.querySelectorAll('.acol-val')].reduce((s, v) => s + parseInt(v.textContent), 0)));
+  check('T8: Säulen je Aspekt summieren sich auf 100 %', aspectPct.every((s) => s === 100), aspectPct.join());
+
+  // Ticket 9: Einzelbewertungen getrennt
+  check('T9: Keine lange Liste in der Bewertungsübersicht', (await p.$$('#view-root table')).length === 0);
+
+  // Ticket 10: Diagrammauswahl filtert
+  await p.click('.sb-row[data-star="5"]'); await wait();
+  check('T10: Klick auf 5 ★-Balken filtert', url().includes('sterne=5') && (await p.getAttribute('.sb-row[data-star="5"]', 'aria-pressed')) === 'true');
+  await p.click('.aspect:nth-child(2) .acol[data-value="5"]'); await wait();
+  check('T10: Klick auf Säule filtert nach Antwort', url().includes('aussage=SQ002') && url().includes('wert=5'));
+  check('T10: Aktive Filter als Chips sichtbar', (await p.$$('.filter-line .fchip')).length === 2);
+  const btnText = await p.textContent('.page-actions .btn');
+  await p.click('.page-actions .btn'); await wait();
+  check('T9: Zugang führt zu Einzelbewertungen mit Filtern', url().includes('#/einzelbewertungen') && url().includes('sterne=5') && url().includes('wert=5'), url());
+  const rowStars = await p.$$eval('tbody .stars-exact', (s) => s.map((x) => x.getAttribute('aria-label')));
+  check('T9: Liste entspricht den Filtern', rowStars.length > 0 && rowStars.every((l) => l.startsWith('5 von')));
+  check('T9: Anzahl im Zugang stimmt mit Liste überein', btnText.includes(`(${(await p.textContent('.card .card-title')).split(' ')[0]})`), btnText);
+  await p.click('.back-link'); await wait();
+  check('T9: Rückweg behält Filter', url().includes('#/bewertungen') && url().includes('sterne=5') && url().includes('wert=5'));
+  await p.click('.filter-line .btn-link'); await wait();
+  check('T10: Bereichsfilter zurücksetzen', !/[?&](sterne|aussage|wert)=/.test(url()), url());
+  await p.focus('.sb-row[data-star="2"]'); await p.keyboard.press('Space'); await wait();
+  check('T10: Diagrammauswahl per Tastatur', url().includes('sterne=2'));
+
+  // Globale Filter
+  await go('#/bewertungen?dienststelle=Standesamt');
+  check('Globale Filter: Zurücksetzen sichtbar und wirksam', await p.isVisible('#reset-filters'));
+  await p.click('#reset-filters'); await wait();
+  check('Globale Filter: zurückgesetzt', !url().includes('dienststelle') && (await p.isHidden('#reset-filters')));
   await p.selectOption('#filter-service', 'Fahrzeug zulassen'); await wait();
-  check('Service-Filter in URL', p.url().includes('service=Fahrzeug'));
   await p.selectOption('#filter-office', 'Bürgeramt'); await wait(200);
-  const svcOpts = await p.$$eval('#filter-service option', o => o.map(x => x.textContent));
-  check('Nach Dienststelle nur zugehörige Services', svcOpts.length === 4 && svcOpts.includes('Wohnsitz ummelden') && !svcOpts.includes('Fahrzeug zulassen'), svcOpts.join('|'));
-  check('Ungültiger Service zurückgesetzt', !p.url().includes('service='));
-  check('Hinweis (Toast) angezeigt', (await p.textContent('#toasts')).includes('zurückgesetzt'));
-  await p.goto(U + '#/start?dienststelle=Standesamt&service=Fahrzeug%20zulassen'); await wait(200);
-  check('Widersprüchliche URL korrigiert', !p.url().includes('service=') && decodeURIComponent(p.url()).includes('Standesamt'));
-  let comboOk = true;
-  for (const office of ['Bürgeramt', 'Standesamt', 'Kfz-Zulassungsstelle', 'Ordnungsamt', 'Ausländerbehörde']) {
-    await p.goto(U + '#/bewertungen?dienststelle=' + encodeURIComponent(office)); await wait(120);
-    const offices = await p.$$eval('tbody tr td:nth-child(2) small', s => [...new Set(s.map(x => x.textContent))]);
-    if (offices.length !== 1 || offices[0] !== office) comboOk = false;
-  }
-  check('Tabelle passt bei jeder Dienststelle', comboOk);
+  check('Dienststelle ↔ Service: ungültige Auswahl zurückgesetzt', !url().includes('service='));
+  await go('#/start?dienststelle=Standesamt&service=Fahrzeug%20zulassen');
+  check('Dienststelle ↔ Service: widersprüchliche URL korrigiert', !url().includes('service='));
 
-  // 2. Aktive Filter + Zurücksetzen
-  await p.goto(U + '#/start?dienststelle=Standesamt'); await wait();
-  check('Aktive Filter sichtbar', (await p.textContent('#active-filters')).includes('Dienststelle: Standesamt'));
-  await p.click('[data-action="reset-filters"]'); await wait();
-  check('Alle Filter zurücksetzen', !p.url().includes('dienststelle'));
+  // Ticket 11/12: Textfeedback
+  await go('#/textfeedback');
+  const heads = await p.$$eval('.text-section-head h3', (h) => h.map((x) => x.textContent.trim()));
+  check('T11: Bereiche „Lob“ und „Kritik“ beschriftet', heads.join() === 'Lob,Kritik', heads.join());
+  check('T11: Unterscheidung auch ohne Farbe (Symbol + Text)', (await p.$$eval('.text-symbol', (s) => s.map((x) => x.textContent.trim()))).join() === '+,−');
+  check('T5: Kein Erklärungsabsatz unter „Textfeedback“', (await p.$$('.view-desc, .page-head p:not(.context)')).length === 0);
+  check('T12: Eine gemeinsame Filterleiste', (await p.$$('.text-filters')).length === 1 && (await p.$$('.text-section .chip, .text-section input')).length === 0);
+  await p.click('.text-filters .chip[data-star="3"]'); await wait();
+  const lobStars = await p.$$eval('.text-lob .comment .stars-exact', (s) => s.map((x) => x.getAttribute('aria-label')));
+  const kritikStars = await p.$$eval('.text-kritik .comment .stars-exact', (s) => s.map((x) => x.getAttribute('aria-label')));
+  check('T12: Sterne-Filter wirkt gleich auf Lob und Kritik', lobStars.length > 0 && kritikStars.length > 0 && [...lobStars, ...kritikStars].every((l) => l.startsWith('3 von')));
+  await p.fill('#text-search', 'Upload'); await wait(100);
+  check('T12: Suche behält Fokus', await p.evaluate(() => document.activeElement.id === 'text-search'));
+  check('T12: Zurücksetzen sichtbar', await p.isVisible('[data-action="reset-text"]'));
+  await p.click('[data-action="reset-text"]'); await wait();
+  check('T12: Filter zurückgesetzt', !url().includes('sterne') && (await p.inputValue('#text-search')) === '');
+  check('T5: Kommentar zeigt zugehörige Sterne', (await p.$$('.comment .stars-exact')).length > 0);
+  await p.focus('.text-kritik .comment'); await p.keyboard.press('Enter'); await wait();
+  const modal = await p.textContent('#modal-body');
+  check('Detailansicht: Bewertung und Kommentar gemeinsam', modal.includes('Gesamtzufriedenheit') && modal.includes('Kritik') && modal.includes('Detailbewertungen'));
+  await p.keyboard.press('Escape'); await wait();
+  check('Detailansicht: Escape, Fokus zurück', (await p.isHidden('#modal')) && (await p.evaluate(() => document.activeElement.classList.contains('comment'))));
+  await go('#/textfeedback?thema=upload');
+  check('Themenfilter von der Startseite als Chip', (await p.textContent('.text-filters')).includes('Thema: Hochladen von Nachweisen'));
 
-  // 3. Kontext bleibt erhalten
-  await p.goto(U + '#/start?zeitraum=q&dienststelle=Ordnungsamt'); await wait();
-  await p.click('.kpi-row a:nth-child(3)'); await wait();
-  const u = decodeURIComponent(p.url());
-  check('KPI → Bewertungen mit Sterne-Filter + globalen Filtern', u.includes('bewertungen') && u.includes('sterne=1,2') && u.includes('zeitraum=q') && u.includes('Ordnungsamt'), u);
-  const starsInTable = await p.$$eval('tbody .stars-exact', s => s.map(x => x.getAttribute('aria-label')));
-  check('Sterne-Filter 1–2 wirkt auf Tabelle', starsInTable.length > 0 && starsInTable.every(l => /^[12] von/.test(l)));
-  check('Bereichsfilter als aktiv angezeigt', (await p.textContent('.lf-active')).includes('Sterne: 1 ★, 2 ★'));
-  await p.click('.nav-item[data-view="start"]'); await wait();
-  const u2 = decodeURIComponent(p.url());
-  check('Globale Filter bleiben beim Navigieren erhalten', u2.includes('zeitraum=q') && u2.includes('Ordnungsamt') && !u2.includes('sterne'));
-  await p.goBack(); await wait();
-  check('Browser-Zurück funktioniert', p.url().includes('bewertungen'));
+  // Ticket 13/14: Services
+  await go('#/services');
+  const officeH = await p.$$eval('.office-head h3', (h) => h.map((x) => parseFloat(getComputedStyle(x).fontSize)));
+  check('T13: Dienststellen als hervorgehobene Abschnitte', officeH.length === 5 && officeH.every((s) => s >= 20));
+  check('T14: Kein Punkt-/Liniendiagramm mehr', (await p.$$('.dot, .dot-track, .ref-line')).length === 0);
+  const svcOk = await p.$$eval('.svc-bar', (rows) => rows.every((r) => r.querySelector('.svc-bar-val b').textContent.includes('★') && r.querySelector('.svc-bar-val small').textContent.startsWith('N =')));
+  check('T14: Balken mit Wert, Einheit und N beschriftet', svcOk);
+  const widths = await p.$$eval('.svc-bar', (rows) => rows.map((r) => {
+    const fill = r.querySelector('.svc-bar-fill'); const track = r.querySelector('.svc-bar-track');
+    return { w: fill ? fill.getBoundingClientRect().width / track.getBoundingClientRect().width : 0, v: parseFloat(r.querySelector('.svc-bar-val b').textContent.replace(',', '.')) };
+  }));
+  check('T14: Gemeinsame Skala 0–5 (Länge = Wert/5)', widths.every((x) => Math.abs(x.w - x.v / 5) < 0.02));
+  await p.click('.svc-bar'); await wait();
+  check('Service-Balken öffnet Bewertungsübersicht des Services', url().includes('#/bewertungen') && url().includes('service='));
 
-  // 4. Konsistenz
-  await p.goto(U + '#/start'); await wait();
-  const kpiPos = await p.textContent('.kpi-row a:nth-child(2) .value');
-  const cols = await p.$$eval('.tile[data-tile="verteilung"] .col-val', c => c.slice(0, 5).map(x => parseInt(x.textContent)));
-  check('Positiv-KPI = 4★ + 5★ der Verteilung', parseInt(kpiPos) === cols[3] + cols[4], `${kpiPos} vs ${cols}`);
-  check('Verteilung summiert sich auf 100 %', cols.reduce((a, c) => a + c, 0) === 100);
-
-  // 5. Logo
-  await p.goto(U + '#/services?dienststelle=B%C3%BCrgeramt'); await wait();
+  // Logo, Demo-Rolle, Tastatur, Responsiv
+  await go('#/services');
   await p.click('.brand a'); await wait();
-  check('Logo führt zur Übersicht', p.url().includes('#/start') && (await p.textContent('.view-title')) === 'Übersicht');
-
-  // 6. Detailansicht
-  await p.goto(U + '#/textfeedback?art=kritik'); await wait();
-  await p.focus('.comment'); await p.keyboard.press('Enter'); await wait();
-  const modalTxt = await p.textContent('#modal-body');
-  check('Detail zeigt Bewertung und Kommentar', !(await p.isHidden('#modal')) && modalTxt.includes('Gesamtzufriedenheit') && modalTxt.includes('Textfeedback derselben Rückmeldung'));
-  check('Fokus im Dialog', await p.evaluate(() => document.activeElement.id === 'modal-close'));
-  await p.keyboard.press('Escape'); await wait(100);
-  check('Escape schließt, Fokus zurück', (await p.isHidden('#modal')) && await p.evaluate(() => document.activeElement.classList.contains('comment')));
-
-  // 7. Themen + Suche
-  await p.click('.chip-group a:nth-of-type(2)'); await wait();
-  check('Themenfilter in URL', p.url().includes('thema='));
-  check('Gefilterte Kommentare haben Themen-Tag', await p.$$eval('.comment', cs => cs.length > 0 && cs.every(c => c.querySelector('.tag'))));
-  await p.fill('#text-search', 'Datei'); await wait(100);
-  check('Suche behält Fokus', await p.evaluate(() => document.activeElement.id === 'text-search'));
-
-  // 8. Kacheln
-  await p.goto(U + '#/start'); await wait();
-  await p.click('[data-action="toggle-customize"]');
-  await p.click('[data-action="tile-move"][data-id="potenzial"][data-dir="-1"]');
-  await p.selectOption('[data-action="tile-size"][data-id="verlauf"]', 'XL');
-  await p.reload(); await wait(200);
-  const order = await p.$$eval('.tile', t => t.map(x => x.dataset.tile + ':' + [...x.classList].find(c => c.startsWith('size-'))));
-  check('Anordnung gespeichert', order[0] === 'potenzial:size-M' && order.includes('verlauf:size-XL'), order.join(','));
-  await p.click('[data-action="toggle-customize"]');
-  await p.dragAndDrop('.tile[data-tile="aspekte"] .drag-handle', '.tile[data-tile="potenzial"] .eyebrow'); await wait();
-  const order2 = await p.$$eval('.tile', t => t.map(x => x.dataset.tile));
-  check('Drag & Drop verschiebt Kachel', order2[0] === 'aspekte', order2.join(','));
-  await p.click('[data-action="reset-layout"]'); await wait();
-  const order3 = await p.$$eval('.tile', t => t.map(x => x.dataset.tile));
-  check('Standardansicht wiederhergestellt', order3.join() === 'gut,potenzial,aufmerksamkeit,verlauf,verteilung,aspekte');
-
-  // 9. Demo-Rolle
+  check('Logo führt zur Übersicht', url().includes('#/start'));
   await p.selectOption('#demo-role', 'ds-Standesamt'); await wait(200);
-  check('Demo-Rolle sperrt Dienststelle', await p.isDisabled('#filter-office') && (await p.inputValue('#filter-office')) === 'Standesamt');
-  await p.goto(U + '#/services'); await wait();
-  const blocks = await p.$$eval('.office-block .card-title', t => t.map(x => x.textContent));
-  check('Rolle begrenzt Services-Ansicht', blocks.length === 1 && blocks[0] === 'Standesamt');
+  check('Demo-Rolle sperrt Dienststelle', (await p.isDisabled('#filter-office')) && (await p.inputValue('#filter-office')) === 'Standesamt');
   await p.selectOption('#demo-role', 'zentral'); await wait();
-
-  // 10. Geringe Fallzahl
-  await p.goto(U + '#/services?zeitraum=1m'); await wait();
-  check('Geringe Fallzahl markiert', (await p.$$('.flag')).length > 0);
-
-  // 11. Fehlende Bewertung
-  await p.goto(U + '#/bewertungen?sterne=fehlend'); await wait();
-  const missing = await p.$$eval('tbody td:nth-child(3)', t => t.map(x => x.textContent.trim()));
-  check('Fehlende Bewertung als „keine Angabe“', missing.length > 0 && missing.every(m => m === 'keine Angabe'));
-
-  // 12. Tastatur
-  await p.goto(U + '#/start'); await wait();
-  await p.reload(); await wait(200);
+  await go('#/start');
   const seen = new Set();
-  for (let i = 0; i < 16; i++) { await p.keyboard.press('Tab'); seen.add(await p.evaluate(() => document.activeElement.id || document.activeElement.className)); }
-  check('Tab erreicht Navigation, Rolle, Filter', [...seen].some(s => String(s).includes('nav-item')) && seen.has('filter-period') && seen.has('demo-role'), [...seen].join('|'));
+  for (let i = 0; i < 14; i++) { await p.keyboard.press('Tab'); seen.add(await p.evaluate(() => document.activeElement.id || document.activeElement.className)); }
+  check('Tab erreicht Navigation, Rolle und Filter', [...seen].some((s) => String(s).includes('nav-item')) && seen.has('filter-period') && seen.has('demo-role'), [...seen].join('|'));
 
-  // Mobil / Tablet
-  const m = await b.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
-  m.on('pageerror', e => errs.push(e.message));
-  await m.goto(U + '#/start'); await m.waitForTimeout(200);
-  check('Mobil ohne horizontales Scrollen', !(await m.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)));
-  await m.screenshot({ path: SP + '/mobile.png', fullPage: true });
-  const t = await b.newPage({ viewport: { width: 1000, height: 900 } });
-  await t.goto(U + '#/start'); await t.waitForTimeout(200);
-  check('Tablet ohne horizontales Scrollen', !(await t.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)));
+  for (const [w, h, name] of [[390, 844, 'Smartphone'], [1000, 900, 'Tablet']]) {
+    const m = await b.newPage({ viewport: { width: w, height: h } });
+    m.on('pageerror', (e) => errs.push(e.message));
+    let ok = true;
+    for (const v of ['start', 'bewertungen', 'textfeedback', 'services']) {
+      await m.goto(U + '#/' + v); await m.waitForTimeout(150);
+      if (await m.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) ok = false;
+    }
+    check(`${name}: kein horizontales Scrollen`, ok);
+    await m.goto(U + '#/start'); await m.waitForTimeout(150);
+    await m.screenshot({ path: `${SP}/${name}.png`, fullPage: true });
+  }
 
   check('Keine JS-Fehler', errs.length === 0, errs.join(' | '));
   console.log(results.join('\n'));
+  console.log(`\n${results.filter((r) => r.startsWith('PASS')).length}/${results.length} bestanden`);
   await b.close();
+  process.exitCode = results.some((r) => r.startsWith('FAIL')) ? 1 : 0;
 })();

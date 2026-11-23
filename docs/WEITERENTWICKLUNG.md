@@ -1,6 +1,59 @@
-# Weiterentwicklung: Bürgerfeedback-Dashboard (Stand 20.11.2026)
+# Weiterentwicklung: Bürgerfeedback-Dashboard
 
-Grundlage: bestehender Clickdummy, neuer Fragebogen (Q00, G01Q02, G02Q03[SQ001–SQ005], G01Q04, G01Q05), Erkenntnisse aus Sarikaya et al. (2019) und Rückmeldungen aus dem ersten Nutzertest.
+## Runde 2: Vereinfachung (Stand 23.11.2026)
+
+Die Vorgaben zur Vereinfachung haben Vorrang vor den früheren Anforderungen nach Anpassungs- und Interaktionsmöglichkeiten. An den Berechnungen (`js/metrics.js`) hat sich nichts geändert.
+
+| Ticket | Umsetzung |
+| --- | --- |
+| 1 Startseite priorisieren | Feste Reihenfolge: zuerst Kennzahlen und Diagramme (Gesamtzufriedenheit mit Verteilung, positive Bewertungen, „Anliegen erledigt“, Verlauf), darunter drei Ergebniskacheln. Bei 1440×900 ist alles ohne Scrollen sichtbar. Die separate Filterchip-Zeile, der Untertitel, die Kacheln „Verteilung“ und „Bewertete Aspekte“ (jetzt Teil der Gesamtzufriedenheit bzw. der Bewertungsübersicht) sowie die Wertetabellen sind entfallen. |
+| 2 Kritische Kachel entfernt | Nur noch die hervorgehobene Kachel „Positive Bewertungen“. Kritische Bewertungen stehen vollständig in der Verteilung direkt daneben (1–2 ★) und in der Bewertungsübersicht („Kritisch (1–2 ★)“). |
+| 3 Kompakte Sterneverteilung | Durchschnitt mit Sternen, Anzahl der Bewertungen, waagerechte Balken von 5 ★ bis 1 ★ mit Prozent und Anzahl, nach dem Vorbild von Google/Amazon. Die Verteilung berücksichtigt alle aktiven Filter. |
+| 4 Layoutanpassung entfernt | Verschieben, Größenänderung, gespeicherte Anordnung und die zugehörigen Schaltflächen sind entfernt. Das Layout passt sich weiterhin an die Bildschirmgröße an (Desktop 3 Spalten, Tablet 2, Smartphone 1). |
+| 5 Texte gekürzt | Kurze Überschriften ohne Dopplungen (z. B. nur noch „Das läuft gut“). Der Einleitungsabsatz unter „Textfeedback“ ist entfernt. Längere Erklärungen stecken in einem einheitlichen **i**-Info-Element (öffnen per Klick oder Enter, schließen per Escape oder Klick daneben). Zeitraum, Bereich und N stehen kompakt unter jeder Seitenüberschrift; jeder Kommentar zeigt seine Sternebewertung. |
+| 6 Neue Bezeichnung | „Bewertungsübersicht“ in Navigation, Seitenüberschrift und Fenstertitel. Davon klar abgegrenzt: „Textfeedback“. |
+| 7 „Keine Angabe“ ausgeblendet | Keine eigene Kategorie mehr in Verteilungen und Filtern. Fehlende Antworten bleiben im Datensatz, zählen zu keiner Kategorie und nicht zum Nenner. Die Bezugsgröße steht sichtbar („1.272 Bewertungen“, „n = 1.268“); die Anzahl ohne Angabe nennt das Info-Element. |
+| 8 Detailbewertungen als Säulen | Jede Aussage hat eine eigene Karte mit kurzer Überschrift, Zustimmungswert, n und fünf beschrifteten Säulen („gar nicht“ … „voll und ganz“, Achse „Ich stimme … zu“). Alle Karten nutzen eine gemeinsame Höhenskala. Der Fragetext steht im Info-Element. Berechnungen sind unverändert. |
+| 9 Einzelbewertungen getrennt | Eigene Seite „Einzelbewertungen“, erreichbar über die Schaltfläche „Einzelbewertungen anzeigen (n)“. Filter werden übernommen; „← Zurück zur Bewertungsübersicht“ behält sie bei. |
+| 10 Bedienung vereinfacht | Die Auswahllisten und Sterne-Chips der Bewertungsübersicht sind entfallen. Stattdessen filtert ein Klick (oder Enter/Leertaste) auf einen Sterne-Balken oder eine Säule direkt. Aktive Filter erscheinen als Chips mit × und „Zurücksetzen“. Globale Filter sind hervorgehoben, wenn sie gesetzt sind, und lassen sich mit „Filter zurücksetzen“ im Kopf zurücksetzen. |
+| 11 Lob und Kritik getrennt | Zwei nebeneinanderliegende Bereiche (auf schmalen Bildschirmen untereinander) mit großer Überschrift „Lob“ bzw. „Kritik“, Symbol (+ / −), Anzahl und eigener Kopfzeile. Auch ohne Farbe unterscheidbar: Symbol, Text und durchgezogener bzw. gestrichelter Rand. |
+| 12 Einheitliche Filter | Eine gemeinsame Filterleiste (Sterne, Suche) gilt für beide Bereiche gleichzeitig, mit einem gemeinsamen „Filter zurücksetzen“. Der Themenfilter aus „Verbesserungspotenzial“ gilt fachlich nur für Kritik und ist im Chip so gekennzeichnet. |
+| 13 Dienststellen gegliedert | Je Dienststelle ein Abschnitt mit großer grüner Überschrift, Unterstrich, Kennzahlen (Ø, N, Anzahl Services) und Abstand zum nächsten Abschnitt. Die Zuordnung ist unverändert. |
+| 14 Diagramm ersetzt | Waagerechte Balken: Länge = Ø Sterne auf einer gemeinsamen Skala von 0 bis 5 (Achse beschriftet), Wert „4,2 ★“ und „N = …“ an jedem Balken. Bei wenigen Antworten ist der Balken schraffiert und markiert. Dieselbe Darstellung nutzt die Kachel „Aufmerksamkeit nötig“. Ein Klick öffnet die Bewertungsübersicht des Services. |
+
+**Entscheidungen, die bestätigt werden sollten**
+- Name „Bewertungsübersicht“ (Ticket 6, Vorschlag aus dem Ticket übernommen).
+- Lob und Kritik nebeneinander statt Umschalter. Damit gelten die Filter automatisch für beide (Ticket 12).
+- Balken statt Säulen auf der Services-Seite, weil Servicenamen lang sind. Die Skala beginnt bei 0, damit Balkenlängen proportional zum Wert sind.
+- Eine Aussagenauswahl filtert nach genau einer Antwortstufe (eindeutige Zuordnung). Gruppenfilter wie „alle Zustimmenden“ gibt es nicht mehr; der Positiv-Link der Startseite filtert auf 4 und 5 Sterne.
+- Die Demo-Rolle ist auf Smartphones weiterhin ausgeblendet.
+
+**Prüfungen Runde 2**: Unit-Tests 13/13. Browser-Prüfung (`tests/ui-check.js`) 60/60, mit Kriterien je Ticket, u. a.:
+- Ergebnisse ohne Scrollen sichtbar bei 1440×900
+- keine Kachel „Kritische Bewertungen“
+- Verteilung = 100 %, und Positiv = 5 ★ + 4 ★
+- keine Layout-Bedienelemente
+- Info-Element per Klick und Tastatur
+- 5 Säulen je Aspekt, die sich jeweils auf 100 % summieren
+- Filter per Diagrammklick und Tastatur
+- Einzelbewertungen mit Filterübernahme und Rückweg
+- gemeinsame Text-Filter
+- Servicebalken proportional zur Skala 0–5
+- kein horizontales Scrollen auf Smartphone und Tablet
+- keine JS-Fehler
+
+**Für den nächsten Nutzertest**
+- Reicht die Startseite ohne Scrollen für den Überblick?
+- Werden die i-Elemente gefunden?
+- Ist die Filterung per Klick auf Balken und Säulen ohne Erklärung verständlich?
+- Wird „Bewertungsübersicht“ verstanden?
+- Sind Lob und Kritik nebeneinander gut lesbar?
+
+---
+
+## Runde 1 (Stand 20.11.2026)
+
+Grundlage: bestehender Clickdummy, neuer Fragebogen (Q00, G01Q02, G02Q03[SQ001–SQ005], G01Q04, G01Q05), Erkenntnisse aus Sarikaya et al. (2019) und Rückmeldungen aus dem ersten Nutzertest. Teile dieser Runde (Kachelanpassung, kumulierte Balken, Bereichsfilter-Auswahllisten, Punktdiagramm) wurden in Runde 2 bewusst ersetzt.
 
 ## 1. Bestandsaufnahme: Was war vorhanden, was wurde geändert?
 

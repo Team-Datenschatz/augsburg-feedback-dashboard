@@ -1,24 +1,31 @@
 /* =====================================================================
    Oberfläche des Bürgerfeedback-Dashboards.
-   - Zustand (Ansicht + Filter) steht in der URL (#/ansicht?zeitraum=…),
-     dadurch bleiben Filter beim Wechsel Übersicht ↔ Details erhalten und
-     der Zurück-Button des Browsers funktioniert.
-   - Globale Filter (Zeitraum, Dienststelle, Service) gelten im ganzen Dashboard.
-   - Lokale Filter (z. B. Sterne im Bereich „Bewertungen“) gelten nur dort.
-   - Die Demo-Rolle simuliert Zugriffsrechte und ist von Ansichtsfiltern getrennt.
+   - Feste Standardansicht (keine individuelle Layoutanpassung).
+   - Zustand (Ansicht + Filter) steht in der URL (#/ansicht?zeitraum=…):
+     Filter bleiben beim Wechsel erhalten, der Zurück-Button funktioniert.
+   - Globale Filter (Zeitraum, Dienststelle, Service) gelten überall.
+   - In der Bewertungsübersicht filtert ein Klick auf Balken/Säulen
+     (lokaler Filter, wird zu den Einzelbewertungen mitgenommen).
+   - Längere Erklärungen stecken in einheitlichen Info-Elementen (i).
+   - Die Demo-Rolle simuliert Zugriffsrechte, getrennt von Ansichtsfiltern.
    ===================================================================== */
 
 const VIEWS = {
   start: "Übersicht",
-  bewertungen: "Bewertungen",
+  bewertungen: "Bewertungsübersicht",
+  einzelbewertungen: "Einzelbewertungen",
   textfeedback: "Textfeedback",
-  services: "Services & Dienststellen",
-  rueckmeldungen: "Einzelrückmeldungen",
+  services: "Services",
   daten: "Daten & Methodik",
 };
+const VIEW_ALIASES = { rueckmeldungen: "einzelbewertungen" };
 const GLOBAL_KEYS = ["zeitraum", "dienststelle", "service"];
-const LAYOUT_KEY = "afd.layout.v1";
 const ROLE_KEY = "afd.demoRolle.v1";
+const PAGE_SIZE = 25;
+const TEXT_PAGE_SIZE = 8;
+
+/* Kurzbeschriftungen der Zustimmungsskala unter den Säulen („Ich stimme … zu“). */
+const AGREE_SHORT = { 1: "gar nicht", 2: "eher nicht", 3: "teils/ teils", 4: "eher", 5: "voll und ganz" };
 
 const DATA = {
   records: SAMPLE_RECORDS,
@@ -29,11 +36,10 @@ const DATA = {
 };
 
 const ui = {
-  customize: false,
   textSearch: "",
   tablePage: 1,
+  textPages: { lob: 1, kritik: 1 },
   lastFocus: null,
-  dragId: null,
 };
 
 /* ---------------- Hilfsfunktionen ---------------- */
@@ -51,9 +57,16 @@ const fmtDate = (d) => (d ? d.toLocaleDateString("de-DE", { day: "2-digit", mont
 const fmtMonth = (d) => d.toLocaleDateString("de-DE", { month: "short" }).replace(".", "");
 
 function signed(n, digits = 1) {
-  const s = Math.abs(n).toFixed(digits).replace(".", ",");
-  if (Number(Math.abs(n).toFixed(digits)) === 0) return "±0" + (digits ? "," + "0".repeat(digits) : "");
-  return (n > 0 ? "+" : "−") + s;
+  const r = Number(Math.abs(n).toFixed(digits));
+  if (r === 0) return "±0";
+  return (n > 0 ? "+" : "−") + r.toFixed(digits).replace(".", ",");
+}
+
+/* Einheitliches Info-Element: Button öffnet/schließt eine kurze Erläuterung. */
+let infoSeq = 0;
+function info(html, label = "Erläuterung anzeigen") {
+  const id = `info-${++infoSeq}`;
+  return `<span class="info-wrap"><button type="button" class="info-btn" data-action="info" aria-expanded="false" aria-controls="${id}" aria-label="${esc(label)}">i</button><span class="info-pop" id="${id}" role="note" hidden>${html}</span></span>`;
 }
 
 /* ---------------- Routing / Zustand ---------------- */
@@ -61,7 +74,8 @@ function signed(n, digits = 1) {
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, "");
   const [path, query = ""] = raw.split("?");
-  const view = VIEWS[path] ? path : "start";
+  const p = VIEW_ALIASES[path] || path;
+  const view = VIEWS[p] ? p : "start";
   const params = Object.fromEntries(new URLSearchParams(query));
   return { view, params };
 }
@@ -79,50 +93,38 @@ function href(view, extra = {}) {
   return buildHash(view, { ...g, ...extra });
 }
 
-function go(view, extra = {}, { replace = false } = {}) {
-  const h = href(view, extra);
-  if (replace) history.replaceState(null, "", h);
-  else location.hash = h;
-  if (replace) render();
-}
-
 function currentRole() {
   const id = localStorage.getItem(ROLE_KEY) || "zentral";
   return DEMO_ROLES.find((r) => r.id === id) || DEMO_ROLES[0];
 }
-
 function allowedOffices() {
   return currentRole().offices || OFFICES;
 }
-
 function allowedServices(office) {
   const offices = office && office !== "Alle" ? [office] : allowedOffices();
   return CATALOG.filter((c) => offices.includes(c.office)).flatMap((c) => c.services);
 }
 
-/* Prüft globale Filter auf Gültigkeit und korrigiert widersprüchliche Kombinationen. */
+/* Prüft globale Filter und korrigiert widersprüchliche Kombinationen. */
 function sanitizeGlobals(params) {
   const notes = [];
   const out = { ...params };
   if (!DATA.periods.some((p) => p.id === out.zeitraum)) out.zeitraum = DATA.periods[0].id;
   const role = currentRole();
   if (role.offices) {
-    if (out.dienststelle !== role.offices[0]) out.dienststelle = role.offices[0];
+    out.dienststelle = role.offices[0];
   } else if (out.dienststelle && out.dienststelle !== "Alle" && !OFFICES.includes(out.dienststelle)) {
     notes.push(`Dienststelle „${out.dienststelle}“ ist unbekannt – Filter zurückgesetzt.`);
     delete out.dienststelle;
   }
-  if (out.service && out.service !== "Alle") {
-    const valid = allowedServices(out.dienststelle);
-    if (!valid.includes(out.service)) {
-      const owner = SERVICE_TO_OFFICE[out.service];
-      notes.push(
-        owner
-          ? `Service-Auswahl „${out.service}“ zurückgesetzt: Der Service gehört zur Dienststelle „${owner}“, nicht zur gewählten Auswahl.`
-          : `Service „${out.service}“ ist unbekannt – Filter zurückgesetzt.`
-      );
-      delete out.service;
-    }
+  if (out.service && out.service !== "Alle" && !allowedServices(out.dienststelle).includes(out.service)) {
+    const owner = SERVICE_TO_OFFICE[out.service];
+    notes.push(
+      owner
+        ? `Service „${out.service}“ zurückgesetzt: Er gehört zur Dienststelle „${owner}“.`
+        : `Service „${out.service}“ ist unbekannt – Filter zurückgesetzt.`
+    );
+    delete out.service;
   }
   return { params: out, notes };
 }
@@ -130,756 +132,567 @@ function sanitizeGlobals(params) {
 function getState() {
   const { view, params } = parseHash();
   const { params: p, notes } = sanitizeGlobals(params);
-  const changed = GLOBAL_KEYS.some((k) => (p[k] || "") !== (params[k] || ""));
-  if (changed) history.replaceState(null, "", buildHash(view, p));
+  if (GLOBAL_KEYS.some((k) => (p[k] || "") !== (params[k] || ""))) history.replaceState(null, "", buildHash(view, p));
   notes.forEach(toast);
-  const period = DATA.periods.find((x) => x.id === p.zeitraum);
   return {
     view,
     params: p,
-    period,
+    period: DATA.periods.find((x) => x.id === p.zeitraum),
     office: p.dienststelle || "Alle",
     service: p.service || "Alle",
   };
 }
 
 function baseFilter(st, range) {
-  return applyFilters(DATA.records, {
-    allowedOffices: allowedOffices(),
-    range,
-    office: st.office,
-    service: st.service,
-  });
+  return applyFilters(DATA.records, { allowedOffices: allowedOffices(), range, office: st.office, service: st.service });
+}
+
+function isDefaultGlobal(st) {
+  return st.period.id === DATA.periods[0].id && (st.office === "Alle" || !!currentRole().offices) && st.service === "Alle";
 }
 
 /* ---------------- Bausteine ---------------- */
 
 function starsHtml(mean, size = "") {
-  if (mean == null) return `<span class="stars-missing">keine Bewertung</span>`;
+  if (mean == null) return "";
   const pct = Math.max(0, Math.min(100, (mean / 5) * 100));
-  return `<span class="stars ${size}" role="img" aria-label="${fmtMean(mean)} von 5 Sternen">
-    <span class="stars-bg" aria-hidden="true">★★★★★</span><span class="stars-fg" style="width:${pct}%" aria-hidden="true">★★★★★</span>
-  </span>`;
+  return `<span class="stars ${size}" role="img" aria-label="${fmtMean(mean)} von 5 Sternen"><span class="stars-bg" aria-hidden="true">★★★★★</span><span class="stars-fg" style="width:${pct}%" aria-hidden="true">★★★★★</span></span>`;
 }
 
 function starsExact(v) {
-  if (v == null) return `<span class="stars-missing">keine Angabe</span>`;
+  if (v == null) return `<span class="muted">keine Angabe</span>`;
   return `<span class="stars-exact" role="img" aria-label="${v} von 5 Sternen"><span aria-hidden="true">${"★".repeat(v)}<span class="off">${"★".repeat(5 - v)}</span></span></span>`;
 }
 
 function lowNBadge(n) {
-  if (n < MIN_N_SHOW) return `<span class="flag flag-none" title="Zu wenige Antworten für eine Auswertung">⚠ zu wenige Antworten (N = ${n})</span>`;
-  if (n < MIN_N_RELIABLE) return `<span class="flag" title="Weniger als ${MIN_N_RELIABLE} Antworten – Werte schwanken stark">⚠ geringe Fallzahl (N = ${n})</span>`;
+  if (n < MIN_N_SHOW) return `<span class="flag flag-none">⚠ zu wenige Antworten</span>`;
+  if (n < MIN_N_RELIABLE) return `<span class="flag">⚠ wenige Antworten</span>`;
   return "";
 }
 
-/* 100-%-Balken einer 5er-Skala, links negativ → rechts positiv. */
-function stackedBar(d, scale, { label = "" } = {}) {
-  if (!d.showable) return `<div class="stack stack-empty">${lowNBadge(d.valid) || "Keine Daten"}</div>`;
-  const segs = scale.values
-    .map((v, i) => {
-      const p = d.pct[i];
-      if (!p) return "";
-      const txt = p >= 9 ? `${p}&nbsp;%` : "";
-      return `<span class="seg" style="flex-basis:${p}%;background:${SCALE_COLORS[v]};color:${SCALE_TEXT_ON[v]}" title="${esc(scale.labels[v])}: ${p} % (${d.counts[i]})">${txt}</span>`;
+function deltaHtml(value, unit, st, { higherIsBetter = true, reliable = true } = {}) {
+  if (value == null) return `<p class="delta delta-none">Kein Vergleich möglich</p>`;
+  const digits = unit === "Pp." ? 0 : 1;
+  const r = Number(value.toFixed(digits));
+  const arrow = r > 0 ? "▲" : r < 0 ? "▼" : "→";
+  const cls = r === 0 ? "delta-flat" : (r > 0) === higherIsBetter ? "delta-good" : "delta-bad";
+  const unitTxt = unit === "Pp." ? " Pp." : "";
+  return `<p class="delta ${cls}"><span aria-hidden="true">${arrow}</span> ${signed(value, digits)}${unitTxt} ggü. ${esc(st.period.prevLabel)}${reliable ? "" : " · unsicher"}</p>`;
+}
+
+function scopeText(st) {
+  if (st.service !== "Alle") return esc(st.service);
+  if (st.office !== "Alle") return esc(st.office);
+  return "Alle Dienststellen";
+}
+
+/* Kopfzeile jeder Seite: kurze Überschrift + kompakter Kontext (Zeitraum, Bereich, N). */
+function pageHead(st, title, n, { actions = "", back = "" } = {}) {
+  return `<div class="page-head">
+    <div class="page-head-main">
+      ${back}
+      <h2 class="page-title">${esc(title)}</h2>
+      <p class="context"><span>${esc(st.period.rangeText)}</span><span>${scopeText(st)}</span><span><b>N = ${fmtInt(n)}</b> Rückmeldungen</span>${info(
+        `<b>N</b> = abgeschlossene Fragebögen im gewählten Zeitraum und Filter.<br>Vergleichszeitraum: ${esc(st.period.prevLabel)}.<br>Freiwilliges Feedback nach Nutzung – nicht repräsentativ für alle Augsburger Bürgerinnen und Bürger. Zusammenhänge sind keine nachgewiesenen Ursachen.`,
+        "Erläuterung zur Datengrundlage"
+      )}</p>
+    </div>
+    ${actions ? `<div class="page-actions">${actions}</div>` : ""}
+  </div>`;
+}
+
+/* Kompakte Sterneverteilung nach dem Vorbild von Google/Amazon: 5 ★ oben bis 1 ★ unten.
+   „Ohne Angabe“ ist keine eigene Kategorie; Bezug sind nur gültige Bewertungen. */
+function starBars(d, { linkTo = null, selected = [], clickable = false } = {}) {
+  const max = Math.max(1, ...d.pct.map((p) => p || 0));
+  const rows = [5, 4, 3, 2, 1]
+    .map((v) => {
+      const p = d.pct[v - 1] ?? 0;
+      const c = d.counts[v - 1];
+      const isSel = selected.includes(String(v));
+      const dim = selected.length && !isSel;
+      const inner = `<span class="sb-label">${v} ★</span>
+        <span class="sb-track"><span class="sb-fill" style="width:${(p / max) * 100}%;background:${SCALE_COLORS[v]}"></span></span>
+        <span class="sb-val"><b>${d.valid ? fmtPct(p) : "–"}</b> <small>(${fmtInt(c)})</small></span>`;
+      const label = `${v} Sterne: ${d.valid ? p + " Prozent" : "keine Daten"}, ${c} Bewertungen`;
+      if (linkTo) return `<a class="sb-row" href="${linkTo(v)}" aria-label="${label} – Bewertungen anzeigen">${inner}</a>`;
+      if (clickable)
+        return `<button type="button" class="sb-row ${dim ? "dim" : ""}" data-action="toggle-star" data-star="${v}" aria-pressed="${isSel}" aria-label="${label} – filtern">${inner}</button>`;
+      return `<div class="sb-row">${inner}</div>`;
     })
     .join("");
-  return `<div class="stack" role="img" aria-label="${esc(label)} ${scale.values.map((v, i) => `${scale.labels[v]} ${d.pct[i]} Prozent`).join(", ")}">${segs}</div>`;
+  return `<div class="star-bars" role="group" aria-label="Verteilung der Sternebewertungen">${rows}</div>`;
 }
 
-function scaleLegend(scale) {
-  return `<ul class="scale-legend" aria-label="Legende">${scale.values
-    .map((v) => `<li><span class="sw" style="background:${SCALE_COLORS[v]}"></span>${esc(scale.labels[v])}</li>`)
-    .join("")}</ul>`;
+function starSummary(d) {
+  return `<div class="star-summary">
+    <span class="big-value">${d.showable ? fmtMean(d.mean) : "–"}</span>
+    <span class="star-summary-side">${starsHtml(d.showable ? d.mean : null, "lg")}<span class="muted">${fmtInt(d.valid)} Bewertungen ${lowNBadge(d.valid)}</span></span>
+  </div>`;
 }
 
-function groupsLine(d, scale) {
+function groupLine(d) {
   const g = d.groups;
-  return `<span class="g g-critical">${esc(scale.groups.critical.short)} ${fmtPct(g.critical.pct)}</span>
-    <span class="g g-neutral">${esc(scale.groups.neutral.short)} ${fmtPct(g.neutral.pct)}</span>
-    <span class="g g-positive">${esc(scale.groups.positive.short)} ${fmtPct(g.positive.pct)}</span>`;
+  return `<p class="group-line"><span>Positiv (4–5 ★) <b>${fmtPct(g.positive.pct)}</b></span><span>Mittel (3 ★) <b>${fmtPct(g.neutral.pct)}</b></span><span>Kritisch (1–2 ★) <b>${fmtPct(g.critical.pct)}</b></span></p>`;
 }
 
-function deltaHtml(value, unit, { higherIsBetter = true, prevLabel, reliable }) {
-  if (value == null) return `<span class="delta delta-none">Kein Vergleich möglich (Vorzeitraum ohne ausreichende Daten)</span>`;
-  const digits = unit === "Pp." ? 0 : 1;
-  const rounded = Number(value.toFixed(digits));
-  let cls = "delta-flat";
-  let word = "unverändert";
-  let arrow = "→";
-  if (rounded > 0) {
-    word = "höher";
-    arrow = "▲";
-    cls = higherIsBetter ? "delta-good" : "delta-bad";
-  } else if (rounded < 0) {
-    word = "niedriger";
-    arrow = "▼";
-    cls = higherIsBetter ? "delta-bad" : "delta-good";
-  }
-  const unitTxt = unit === "Pp." ? " Prozentpunkte" : "";
-  return `<span class="delta ${cls}"><span aria-hidden="true">${arrow}</span> ${signed(value, digits)}${unitTxt} (${word}) ggü. ${esc(prevLabel)}${
-    reliable ? "" : ` <span class="flag-inline">· Vergleich unsicher, geringe Fallzahl</span>`
-  }</span>`;
+function missingNote(d, what = "Sternebewertung") {
+  return `Prozentwerte beziehen sich auf ${fmtInt(d.valid)} Rückmeldungen mit ${what}. ${fmtInt(d.missing)} Rückmeldungen ohne Angabe sind darin nicht enthalten und keiner Kategorie zugerechnet.`;
 }
 
-function contextBar(st, n, nStars) {
-  const scope =
-    st.service !== "Alle"
-      ? `Service „${esc(st.service)}“ (${esc(SERVICE_TO_OFFICE[st.service])})`
-      : st.office !== "Alle"
-      ? `Dienststelle ${esc(st.office)} (alle Services)`
-      : "Alle Dienststellen und Services";
-  return `<p class="context-bar">
-    <span><b>Zeitraum:</b> ${esc(st.period.rangeText)}</span>
-    <span><b>Bereich:</b> ${scope}</span>
-    <span><b>Grundlage:</b> N&nbsp;=&nbsp;${fmtInt(n)} abgeschlossene Rückmeldungen${nStars != null ? `, davon ${fmtInt(nStars)} mit Sternebewertung` : ""}</span>
-    <span class="context-note">Freiwilliges Feedback nach Nutzung – nicht repräsentativ für alle Augsburger*innen.</span>
-  </p>`;
+/* Waagerechte Balken für Ø Sterne je Service – feste Skala 0–5 Sterne. */
+function serviceBars(rows, { showOffice = false } = {}) {
+  if (!rows.length) return `<p class="empty">Keine Services mit ausreichender Fallzahl.</p>`;
+  return `<div class="svc-bars" role="list">${rows
+    .map(
+      (r) => `<a role="listitem" class="svc-bar ${r.reliable ? "" : "is-low"}" href="${href("bewertungen", { dienststelle: r.office, service: r.service })}" aria-label="${esc(r.service)}: Ø ${fmtMean(r.mean)} von 5 Sternen, ${r.n} Bewertungen – Bewertungsübersicht öffnen">
+        <span class="svc-bar-name">${esc(r.service)}${showOffice ? `<small>${esc(r.office)}</small>` : ""}</span>
+        <span class="svc-bar-track">${r.showable ? `<span class="svc-bar-fill" style="width:${(r.mean / 5) * 100}%"></span>` : ""}</span>
+        <span class="svc-bar-val"><b>${r.showable ? fmtMean(r.mean) + " ★" : "–"}</b><small>N = ${fmtInt(r.n)}</small></span>
+        ${r.reliable ? "" : `<span class="svc-bar-flag">${lowNBadge(r.n)}</span>`}
+      </a>`
+    )
+    .join("")}</div>
+    <div class="svc-axis" aria-hidden="true"><span></span><span class="svc-axis-ticks">${[0, 1, 2, 3, 4, 5].map((v) => `<i style="left:${v * 20}%">${v}</i>`).join("")}</span><span class="svc-axis-unit">Ø Sterne</span></div>`;
 }
 
 /* ---------------- Ansicht: Übersicht ---------------- */
-
-const TILES = {
-  gut: { title: "Das läuft gut", question: "Was läuft gut?", render: tileGood },
-  potenzial: { title: "Verbesserungspotenziale", question: "Wo gibt es Verbesserungspotenzial?", render: tileImprove },
-  aufmerksamkeit: { title: "Services mit Aufmerksamkeitsbedarf", question: "Welche Services benötigen Aufmerksamkeit?", render: tileAttention },
-  verlauf: { title: "Zeitverlauf der Gesamtzufriedenheit", question: "Wie entwickelt sich die Bewertung?", render: tileTrend },
-  verteilung: { title: "Verteilung der Sternebewertungen", question: "Wie verteilen sich die Antworten?", render: tileDistribution },
-  aspekte: { title: "Bewertete Aspekte", question: "Welche Aspekte werden wie bewertet?", render: tileAspects },
-};
-const DEFAULT_LAYOUT = [
-  { id: "gut", size: "M" },
-  { id: "potenzial", size: "M" },
-  { id: "aufmerksamkeit", size: "M" },
-  { id: "verlauf", size: "M" },
-  { id: "verteilung", size: "M" },
-  { id: "aspekte", size: "M" },
-];
-const SIZES = { S: "Schmal (1/3)", M: "Mittel (1/2)", L: "Breit (2/3)", XL: "Volle Breite" };
-
-function loadLayout() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY));
-    if (Array.isArray(saved)) {
-      const valid = saved.filter((t) => TILES[t.id] && SIZES[t.size]);
-      const missing = DEFAULT_LAYOUT.filter((d) => !valid.some((v) => v.id === d.id));
-      return [...valid, ...missing];
-    }
-  } catch (e) {
-    /* ungültige Speicherung ignorieren */
-  }
-  return DEFAULT_LAYOUT.map((t) => ({ ...t }));
-}
-function saveLayout(layout) {
-  localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
-}
-function isDefaultLayout(layout) {
-  return JSON.stringify(layout) === JSON.stringify(DEFAULT_LAYOUT);
-}
 
 function viewStart(st) {
   const cur = baseFilter(st, st.period);
   const prev = baseFilter(st, st.period.prev);
   const d = starDist(cur);
-  const dPrev = starDist(prev);
-  const cmp = compareDist(d, dPrev);
+  const cmp = compareDist(d, starDist(prev));
   const success = itemDist(cur, "SQ001");
   const successPrev = itemDist(prev, "SQ001");
   const successDelta = success.showable && successPrev.showable ? success.groups.positive.pct - successPrev.groups.positive.pct : null;
-  const ctx = { st, cur, prev, d, dPrev };
-  const layout = loadLayout();
-  const cmpReliable = cmp ? cmp.reliable : false;
-
-  const kpis = `
-    <section class="kpi-row" aria-label="Kennzahlen">
-      <a class="card kpi clickable" href="${href("bewertungen")}">
-        <h3>Ø Gesamtzufriedenheit</h3>
-        <div class="kpi-main"><span class="value">${d.showable ? fmtMean(d.mean) : "–"}</span>${d.showable ? starsHtml(d.mean, "lg") : ""}</div>
-        <div class="sub">von 5 Sternen · N = ${fmtInt(d.valid)} Bewertungen ${lowNBadge(d.valid)}</div>
-        ${deltaHtml(cmp ? cmp.mean : null, "", { prevLabel: st.period.prevLabel, reliable: cmpReliable })}
-      </a>
-      <a class="card kpi clickable" href="${href("bewertungen", { sterne: "4,5" })}">
-        <h3>Positive Bewertungen</h3>
-        <div class="kpi-main"><span class="value">${d.showable ? fmtPct(d.groups.positive.pct) : "–"}</span></div>
-        <div class="sub">4 oder 5 Sterne · ${fmtInt(d.groups.positive.n)} von ${fmtInt(d.valid)}</div>
-        ${miniSplit(d)}
-        ${deltaHtml(cmp ? cmp.positive : null, "Pp.", { prevLabel: st.period.prevLabel, reliable: cmpReliable })}
-      </a>
-      <a class="card kpi clickable" href="${href("bewertungen", { sterne: "1,2" })}">
-        <h3>Kritische Bewertungen</h3>
-        <div class="kpi-main"><span class="value">${d.showable ? fmtPct(d.groups.critical.pct) : "–"}</span></div>
-        <div class="sub">1 oder 2 Sterne · ${fmtInt(d.groups.critical.n)} von ${fmtInt(d.valid)}</div>
-        ${miniSplit(d)}
-        ${deltaHtml(cmp ? cmp.critical : null, "Pp.", { higherIsBetter: false, prevLabel: st.period.prevLabel, reliable: cmpReliable })}
-      </a>
-      <a class="card kpi clickable" href="${href("bewertungen", { aussage: "SQ001", kategorie: "positive" })}">
-        <h3>Anliegen erfolgreich erledigt</h3>
-        <div class="kpi-main"><span class="value">${success.showable ? fmtPct(success.groups.positive.pct) : "–"}</span></div>
-        <div class="sub">Zustimmung („stimme eher/voll zu“) · ${fmtInt(success.groups.positive.n)} von ${fmtInt(success.valid)}</div>
-        ${deltaHtml(successDelta, "Pp.", { prevLabel: st.period.prevLabel, reliable: success.reliable && successPrev.reliable })}
-      </a>
-    </section>
-    <p class="kpi-foot">Anteile beziehen sich auf alle Antworten mit Bewertung (Nenner). Ohne Angabe: ${fmtInt(d.missing)} Rückmeldungen ohne Sternebewertung – nicht im Nenner, nicht als 0 Sterne gezählt.
-      <a href="${href("daten")}#definitionen">Definitionen</a></p>`;
-
-  const tiles = layout
-    .map((t, idx) => {
-      const def = TILES[t.id];
-      return `<article class="card tile size-${t.size}" data-tile="${t.id}" ${ui.customize ? 'draggable="true"' : ""} aria-labelledby="tile-${t.id}">
-        ${ui.customize ? tileControls(t, idx, layout.length) : ""}
-        <p class="eyebrow">${esc(def.question)}</p>
-        <h2 class="card-title" id="tile-${t.id}">${esc(def.title)}</h2>
-        ${def.render(ctx)}
-      </article>`;
-    })
-    .join("");
-
-  return `
-    <div class="view-head">
-      <div>
-        <h2 class="view-title">Übersicht</h2>
-        ${contextBar(st, cur.length, d.valid)}
-      </div>
-      <div class="view-actions">
-        <button class="btn secondary" data-action="toggle-customize" aria-pressed="${ui.customize}">${ui.customize ? "Anpassung beenden" : "Ansicht anpassen"}</button>
-        ${!isDefaultLayout(layout) || ui.customize ? `<button class="btn ghost" data-action="reset-layout">Standardansicht wiederherstellen</button>` : ""}
-      </div>
-    </div>
-    ${ui.customize ? `<p class="customize-hint" role="status">Kacheln per Ziehen am Griff ⠿ verschieben oder mit den Pfeiltasten-Schaltflächen „Nach vorne“/„Nach hinten“. Die Größe wählen Sie im Auswahlfeld. Ihre Anordnung wird in diesem Browser gespeichert.</p>` : ""}
-    ${kpis}
-    <section class="tile-grid ${ui.customize ? "is-customizing" : ""}" aria-label="Kacheln">${tiles}</section>`;
-}
-
-function miniSplit(d) {
-  if (!d.showable) return "";
-  return `<div class="mini-split" aria-hidden="true">
-      <span style="flex-basis:${d.groups.critical.pct}%;background:${SCALE_COLORS[1]}"></span>
-      <span style="flex-basis:${d.groups.neutral.pct}%;background:${SCALE_COLORS[3]}"></span>
-      <span style="flex-basis:${d.groups.positive.pct}%;background:${SCALE_COLORS[5]}"></span>
-    </div>
-    <div class="mini-legend">${groupsLine(d, STAR_SCALE)}</div>`;
-}
-
-function tileControls(t, idx, total) {
-  return `<div class="tile-controls">
-    <span class="drag-handle" title="Zum Verschieben ziehen" aria-hidden="true">⠿</span>
-    <button class="btn-mini" data-action="tile-move" data-id="${t.id}" data-dir="-1" ${idx === 0 ? "disabled" : ""} aria-label="${esc(TILES[t.id].title)} nach vorne verschieben">↑ Nach vorne</button>
-    <button class="btn-mini" data-action="tile-move" data-id="${t.id}" data-dir="1" ${idx === total - 1 ? "disabled" : ""} aria-label="${esc(TILES[t.id].title)} nach hinten verschieben">↓ Nach hinten</button>
-    <label class="size-select">Größe
-      <select data-action="tile-size" data-id="${t.id}">${Object.entries(SIZES)
-        .map(([k, v]) => `<option value="${k}" ${k === t.size ? "selected" : ""}>${v}</option>`)
-        .join("")}</select>
-    </label>
-  </div>`;
-}
-
-function tileGood({ st, cur }) {
   const aspects = ITEMS.map((it) => ({ it, d: itemDist(cur, it.code) })).filter((a) => a.d.reliable);
-  const bestAspect = aspects.sort((a, b) => b.d.groups.positive.pct - a.d.groups.positive.pct)[0];
-  const services = st.service === "Alle" ? serviceTable(cur, allowedServices(st.office)).filter((s) => s.reliable) : [];
-  const topServices = services.sort((a, b) => b.mean - a.mean).slice(0, 2);
-  const praise = praiseComments(cur);
-  const shown = praise.slice(0, 3);
+
   return `
-    <ul class="good-facts">
-      ${bestAspect ? `<li><span class="fact-label">Höchste Zustimmung</span> <a href="${href("bewertungen", { aussage: bestAspect.it.code, kategorie: "positive" })}"><b>${esc(bestAspect.it.label)}</b></a> – ${fmtPct(bestAspect.d.groups.positive.pct)} Zustimmung</li>` : ""}
-      ${topServices
-        .map(
-          (s) => `<li><span class="fact-label">Hoch bewertet</span> <a href="${href("rueckmeldungen", { svc: s.service, zurueck: "start" })}"><b>${esc(s.service)}</b></a> – Ø ${fmtMean(s.mean)} ★ (N = ${fmtInt(s.n)})</li>`
-        )
-        .join("")}
-    </ul>
-    <h3 class="sub-title">Lob aus den Kommentaren</h3>
-    ${
-      shown.length
-        ? `<div class="quotes">${shown.map(quoteCard).join("")}</div>
-           <p class="selection-rule">Auswahl: die ${shown.length} neuesten von ${fmtInt(praise.length)} Kommentaren zu „Was hat Ihnen besonders gut gefallen?“ von Personen, die insgesamt <b>5 Sterne</b> vergeben haben.
-           <a href="${href("textfeedback", { art: "lob", sterne: "5" })}">Alle ${fmtInt(praise.length)} ansehen →</a></p>`
-        : `<p class="empty">Im gewählten Filter gibt es keine Kommentare von Personen mit 5 Sternen.</p>`
-    }`;
+    ${pageHead(st, "Übersicht", cur.length)}
+
+    <section class="hero" aria-label="Kennzahlen">
+      <article class="card card-hero">
+        <div class="card-head"><h3 class="card-title"><a class="stretched" href="${href("bewertungen")}">Gesamtzufriedenheit</a></h3>${info(
+          `„${esc(QUESTION_TEXT.G01Q02)}“<br>${missingNote(d)}`,
+          "Erläuterung zur Gesamtzufriedenheit"
+        )}</div>
+        ${starSummary(d)}
+        ${deltaHtml(cmp ? cmp.mean : null, "", st, { reliable: cmp?.reliable })}
+        ${starBars(d, { linkTo: (v) => href("bewertungen", { sterne: String(v) }) })}
+      </article>
+
+      <div class="kpi-stack">
+        <article class="card kpi kpi-primary">
+          <div class="card-head"><h3 class="card-title"><a class="stretched" href="${href("bewertungen", { sterne: "4,5" })}">Positive Bewertungen</a></h3>${info(
+            `Anteil der Rückmeldungen mit 4 oder 5 Sternen. Kritische Bewertungen (1–2 Sterne) sehen Sie in der Verteilung links und in der Bewertungsübersicht.<br>${missingNote(d)}`,
+            "Erläuterung zu positiven Bewertungen"
+          )}</div>
+          <p class="big-value">${d.showable ? fmtPct(d.groups.positive.pct) : "–"}</p>
+          <p class="kpi-sub">4–5 ★ · ${fmtInt(d.groups.positive.n)} von ${fmtInt(d.valid)}</p>
+          ${deltaHtml(cmp ? cmp.positive : null, "Pp.", st, { reliable: cmp?.reliable })}
+        </article>
+        <article class="card kpi">
+          <div class="card-head"><h3 class="card-title"><a class="stretched" href="${href("bewertungen", { aussage: "SQ001" })}">Anliegen erledigt</a></h3>${info(
+            `„${esc(ITEMS.find((i) => i.code === "SQ001").text)}“<br>Anteil „stimme eher zu“ und „stimme voll und ganz zu“ an ${fmtInt(success.valid)} Antworten auf diese Aussage.`,
+            "Erläuterung zu Anliegen erledigt"
+          )}</div>
+          <p class="big-value">${success.showable ? fmtPct(success.groups.positive.pct) : "–"}</p>
+          <p class="kpi-sub">Zustimmung · ${fmtInt(success.groups.positive.n)} von ${fmtInt(success.valid)}</p>
+          ${deltaHtml(successDelta, "Pp.", st, { reliable: success.reliable && successPrev.reliable })}
+        </article>
+      </div>
+
+      <article class="card card-trend">
+        <div class="card-head"><h3 class="card-title">Verlauf Ø Sterne</h3>${info(
+          `Ø Sternebewertung je Monat in den 12 Monaten bis Ende des gewählten Zeitraums. Hinterlegt: gewählter Zeitraum. Zahl unter dem Monat: Anzahl Bewertungen. Leerer Punkt: weniger als ${MIN_N_RELIABLE} Bewertungen.`,
+          "Erläuterung zum Verlauf"
+        )}</div>
+        ${trendChart(st)}
+      </article>
+    </section>
+
+    <section class="insights" aria-label="Ergebnisse">
+      ${insightGood(st, cur, aspects)}
+      ${insightImprove(cur, aspects)}
+      ${insightAttention(st, cur)}
+    </section>`;
+}
+
+function insightGood(st, cur, aspects) {
+  const best = [...aspects].sort((a, b) => b.d.groups.positive.pct - a.d.groups.positive.pct)[0];
+  const services = st.service === "Alle" ? serviceTable(cur, allowedServices(st.office)).filter((s) => s.reliable) : [];
+  const top = services.sort((a, b) => b.mean - a.mean)[0];
+  const praise = praiseComments(cur);
+  const shown = praise.slice(0, 2);
+  return `<article class="card insight">
+    <div class="card-head"><h3 class="card-title">Das läuft gut</h3>${info(
+      `Kommentare: die neuesten Antworten auf „${esc(QUESTION_TEXT.G01Q05)}“ von Personen, die insgesamt 5 Sterne vergeben haben (${fmtInt(praise.length)} im Filter).<br>Top-Service: höchste Ø-Bewertung unter Services mit mindestens ${MIN_N_RELIABLE} Bewertungen.`,
+      "Erläuterung zur Auswahl"
+    )}</div>
+    <dl class="facts">
+      ${best ? `<div><dt>Höchste Zustimmung</dt><dd>${esc(best.it.label)} <b>${fmtPct(best.d.groups.positive.pct)}</b></dd></div>` : ""}
+      ${top ? `<div><dt>Top-Service</dt><dd>${esc(top.service)} <b>${fmtMean(top.mean)} ★</b></dd></div>` : ""}
+    </dl>
+    ${shown.length ? `<div class="quotes">${shown.map(quoteCard).join("")}</div>` : `<p class="empty">Keine Kommentare mit 5 Sternen im Filter.</p>`}
+    <a class="more-link" href="${href("textfeedback", { sterne: "5" })}">Alle ${fmtInt(praise.length)} Lob-Kommentare mit 5 ★ →</a>
+  </article>`;
 }
 
 function quoteCard(r) {
-  return `<button class="quote" data-action="detail" data-id="${esc(r.id)}">
+  return `<button type="button" class="quote" data-action="detail" data-id="${esc(r.id)}">
     <span class="quote-text">${esc(r.textPositive)}</span>
-    <span class="quote-meta">${starsExact(r.stars)} · ${esc(r.service)} · ${fmtDate(r.date)}</span>
+    <span class="meta">${starsExact(r.stars)} · ${esc(r.service)}</span>
   </button>`;
 }
 
-function tileImprove({ cur }) {
+function insightImprove(cur, aspects) {
+  const weakest = [...aspects].sort((a, b) => a.d.groups.positive.pct - b.d.groups.positive.pct)[0];
   const t = themeCounts(cur);
-  const aspects = ITEMS.map((it) => ({ it, d: itemDist(cur, it.code) })).filter((a) => a.d.reliable);
-  const weakest = aspects.sort((a, b) => a.d.groups.positive.pct - b.d.groups.positive.pct)[0];
   const max = t.list.length ? t.list[0].n : 1;
-  return `
-    ${weakest ? `<p class="weak-aspect"><span class="fact-label">Geringste Zustimmung</span> <a href="${href("bewertungen", { aussage: weakest.it.code, kategorie: "critical" })}"><b>${esc(weakest.it.label)}</b></a> – ${fmtPct(weakest.d.groups.positive.pct)} Zustimmung, ${fmtPct(weakest.d.groups.critical.pct)} Ablehnung</p>` : ""}
-    <h3 class="sub-title">Häufige Themen in der Kritik</h3>
+  return `<article class="card insight">
+    <div class="card-head"><h3 class="card-title">Verbesserungspotenzial</h3>${info(
+      `Themen aus ${fmtInt(t.totalTexts)} Antworten auf „Was war besonders schlecht?“, zugeordnet per Stichwortliste (siehe Daten &amp; Methodik). Mehrfachzuordnung möglich; ${fmtInt(t.unassigned)} Kommentare ohne Thema. Die Häufigkeit zeigt, worüber geschrieben wird – nicht die Ursache von Bewertungen.`,
+      "Erläuterung zu den Themen"
+    )}</div>
+    <dl class="facts">
+      ${weakest ? `<div><dt>Geringste Zustimmung</dt><dd>${esc(weakest.it.label)} <b>${fmtPct(weakest.d.groups.positive.pct)}</b></dd></div>` : ""}
+    </dl>
     ${
       t.list.length
-        ? `<ol class="theme-list">${t.list
+        ? `<ol class="theme-list" aria-label="Häufige Themen in der Kritik">${t.list
             .slice(0, 5)
             .map(
-              (th) => `<li><a class="theme-row" href="${href("textfeedback", { art: "kritik", thema: th.id })}">
+              (th) => `<li><a class="theme-row" href="${href("textfeedback", { thema: th.id })}" aria-label="${esc(th.label)}: ${th.n} Kommentare">
                 <span class="theme-label">${esc(th.label)}</span>
                 <span class="theme-bar"><span style="width:${(th.n / max) * 100}%"></span></span>
                 <span class="theme-n">${fmtInt(th.n)}</span>
               </a></li>`
             )
-            .join("")}</ol>
-          <p class="selection-rule">Grundlage: ${fmtInt(t.totalTexts)} Antworten auf „Was war besonders schlecht?“. Zuordnung per Stichwortliste, Mehrfachzuordnung möglich; ${fmtInt(t.unassigned)} Kommentare ohne Themenzuordnung.
-            Häufigkeit zeigt, worüber geschrieben wird – nicht die Ursache von Bewertungen.
-            <a href="${href("textfeedback", { art: "kritik" })}">Alle Kommentare →</a></p>`
-        : `<p class="empty">Keine kritischen Kommentare im gewählten Filter.</p>`
-    }`;
+            .join("")}</ol>`
+        : `<p class="empty">Keine Kritik-Kommentare im Filter.</p>`
+    }
+    <a class="more-link" href="${href("textfeedback")}">Alle Kritik-Kommentare →</a>
+  </article>`;
 }
 
-function tileAttention({ st, cur }) {
+function insightAttention(st, cur) {
+  let body;
   if (st.service !== "Alle") {
-    const d = starDist(cur);
-    return `<p>Es ist ein einzelner Service ausgewählt. Vergleich aller Services: <a href="${href("services")}">Services &amp; Dienststellen →</a></p>
-      <p>Ø ${fmtMean(d.mean)} ★ bei N = ${fmtInt(d.valid)} ${lowNBadge(d.valid)}</p>`;
+    body = `<p class="empty">Ein einzelner Service ist ausgewählt.</p>`;
+  } else {
+    const rows = serviceTable(cur, allowedServices(st.office));
+    const lowest = rows.filter((r) => r.reliable).sort((a, b) => a.mean - b.mean).slice(0, 3);
+    body = serviceBars(lowest, { showOffice: st.office === "Alle" });
   }
-  const rows = serviceTable(cur, allowedServices(st.office));
-  const reliable = rows.filter((r) => r.reliable).sort((a, b) => a.mean - b.mean);
-  const excluded = rows.filter((r) => !r.reliable);
-  const lowest = reliable.slice(0, 3);
-  const all = starDist(cur);
-  return `
-    <p class="tile-intro">Die drei Services mit der niedrigsten Ø-Sternebewertung (nur Services mit mindestens ${MIN_N_RELIABLE} Bewertungen).</p>
-    ${lowest.length ? `<div class="svc-compare">${lowest.map((r) => serviceDotRow(r, all.mean)).join("")}</div>${dotAxis(all.mean)}` : `<p class="empty">Kein Service erreicht die Mindestfallzahl.</p>`}
-    <p class="selection-rule">${excluded.length ? `${excluded.length} Service(s) wegen geringer Fallzahl nicht eingeordnet. ` : ""}Senkrechte Linie: Ø aller ausgewählten Services (${fmtMean(all.mean)}).
-      <a href="${href("services")}">Alle Services vergleichen →</a></p>`;
+  return `<article class="card insight">
+    <div class="card-head"><h3 class="card-title">Aufmerksamkeit nötig</h3>${info(
+      `Die drei Services mit der niedrigsten Ø-Sternebewertung, nur Services mit mindestens ${MIN_N_RELIABLE} Bewertungen. Skala 0–5 Sterne, wie auf der Seite „Services“.`,
+      "Erläuterung zur Auswahl"
+    )}</div>
+    ${body}
+    <a class="more-link" href="${href("services")}">Alle Services vergleichen →</a>
+  </article>`;
 }
 
-/* Punkt auf einer festen 1–5-Achse (gleiche Skala in allen Ansichten). */
-function dotPos(m) {
-  return ((m - 1) / 4) * 100;
-}
-function serviceDotRow(r, ref) {
-  return `<a class="svc-row" href="${href("rueckmeldungen", { svc: r.service, zurueck: parseHash().view })}">
-    <span class="svc-name"><b>${esc(r.service)}</b><small>${esc(r.office)} · N = ${fmtInt(r.n)} ${r.reliable ? "" : lowNBadge(r.n)}</small></span>
-    <span class="dot-track">${ref != null ? `<span class="ref-line" style="left:${dotPos(ref)}%"></span>` : ""}${r.showable ? `<span class="dot ${r.reliable ? "" : "dot-low"}" style="left:${dotPos(r.mean)}%"></span>` : ""}</span>
-    <span class="svc-val">${r.showable ? fmtMean(r.mean) + " ★" : "–"}</span>
-  </a>`;
-}
-function dotAxis() {
-  return `<div class="dot-axis" aria-hidden="true"><span></span><span class="ticks">${[1, 2, 3, 4, 5].map((v) => `<i style="left:${dotPos(v)}%">${v} ★</i>`).join("")}</span><span></span></div>`;
-}
-
-function tileTrend({ st }) {
+function trendChart(st) {
   const recs = applyFilters(DATA.records, { allowedOffices: allowedOffices(), office: st.office, service: st.service });
   const series = monthlySeries(recs, st.period.to);
-  const W = 520;
-  const H = 190;
-  const padL = 34;
-  const padR = 10;
-  const padT = 12;
-  const padB = 44;
-  const x = (i) => padL + (i + 0.5) * ((W - padL - padR) / series.length);
+  const W = 460;
+  const H = 210;
+  const padL = 22;
+  const padR = 6;
+  const padT = 18;
+  const padB = 36;
+  const step = (W - padL - padR) / series.length;
+  const x = (i) => padL + (i + 0.5) * step;
   const y = (m) => padT + (1 - (m - 1) / 4) * (H - padT - padB);
   const inSel = (pt) => pt.from >= st.period.from && pt.to <= st.period.to;
-  const bandW = (W - padL - padR) / series.length;
-  const bands = series.map((pt, i) => (inSel(pt) ? `<rect x="${x(i) - bandW / 2}" y="${padT}" width="${bandW}" height="${H - padT - padB}" class="sel-band"/>` : "")).join("");
+  const bands = series.map((pt, i) => (inSel(pt) ? `<rect x="${x(i) - step / 2}" y="${padT - 14}" width="${step}" height="${H - padT - padB + 14}" class="sel-band"/>` : "")).join("");
   const grid = [1, 2, 3, 4, 5]
     .map((v) => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${padL - 6}" y="${y(v) + 4}" class="axis" text-anchor="end">${v}</text>`)
     .join("");
   let path = "";
   series.forEach((pt, i) => {
-    if (!pt.showable) return;
-    path += `${path && series[i - 1]?.showable ? "L" : "M"}${x(i)},${y(pt.mean)} `;
+    if (pt.showable) path += `${path && series[i - 1]?.showable ? "L" : "M"}${x(i).toFixed(1)},${y(pt.mean).toFixed(1)} `;
   });
   const pts = series
     .map((pt, i) =>
       pt.showable
-        ? `<circle cx="${x(i)}" cy="${y(pt.mean)}" r="5" class="${pt.reliable ? "pt" : "pt pt-low"}"><title>${fmtMonth(pt.from)} ${pt.from.getFullYear()}: Ø ${fmtMean(pt.mean)} ★, N = ${pt.n}</title></circle>`
+        ? `<circle cx="${x(i)}" cy="${y(pt.mean)}" r="4.5" class="${pt.reliable ? "pt" : "pt pt-low"}"/>
+           ${inSel(pt) ? `<text x="${x(i)}" y="${y(pt.mean) - 9}" class="pt-label" text-anchor="middle">${fmtMean(pt.mean)}</text>` : ""}`
         : ""
     )
     .join("");
   const labels = series
-    .map(
-      (pt, i) => `<text x="${x(i)}" y="${H - padB + 16}" class="axis" text-anchor="middle">${fmtMonth(pt.from)}</text>
-      <text x="${x(i)}" y="${H - padB + 30}" class="axis axis-n" text-anchor="middle">${pt.n}</text>`
-    )
+    .map((pt, i) => `<text x="${x(i)}" y="${H - padB + 15}" class="axis" text-anchor="middle">${fmtMonth(pt.from)}</text><text x="${x(i)}" y="${H - padB + 28}" class="axis axis-n" text-anchor="middle">${pt.n}</text>`)
     .join("");
-  const anyLow = series.some((p) => !p.reliable);
-  return `
-    <p class="tile-intro">Ø Sterne je Monat, 12 Monate bis Ende des gewählten Zeitraums. Hinterlegt: gewählter Zeitraum. Unter den Monaten: Fallzahl N.</p>
-    <svg class="trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="Liniendiagramm Ø Sternebewertung je Monat">
-      ${bands}${grid}<path d="${path}" class="line"/>${pts}${labels}
-      <text x="${padL - 30}" y="${H - padB + 30}" class="axis axis-n">N</text>
-    </svg>
-    ${anyLow ? `<p class="selection-rule"><span class="legend-pt-low" aria-hidden="true"></span> Heller Punkt: weniger als ${MIN_N_RELIABLE} Bewertungen im Monat – Wert schwankt stark.</p>` : ""}
-    <details class="table-alt"><summary>Werte als Tabelle</summary>
-      <table><thead><tr><th scope="col">Monat</th><th scope="col">Ø Sterne</th><th scope="col">Positiv</th><th scope="col">N</th></tr></thead>
-      <tbody>${series.map((p) => `<tr><td>${fmtMonth(p.from)} ${p.from.getFullYear()}</td><td>${p.showable ? fmtMean(p.mean) : "–"}</td><td>${p.showable ? fmtPct(p.positive) : "–"}</td><td>${p.n}</td></tr>`).join("")}</tbody></table>
-    </details>`;
+  const desc = series.map((p) => `${fmtMonth(p.from)} ${p.from.getFullYear()}: ${p.showable ? fmtMean(p.mean) : "keine Daten"} (N ${p.n})`).join("; ");
+  return `<svg class="trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="Ø Sternebewertung je Monat. ${esc(desc)}">${bands}${grid}<path d="${path}" class="line"/>${pts}${labels}</svg>`;
 }
 
-function starColumns(d, { selected = null, clickable = false } = {}) {
-  const maxPct = Math.max(1, ...d.pct.map((p) => p || 0));
-  const cols = STAR_SCALE.values
-    .map((v, i) => {
-      const p = d.pct[i] ?? 0;
-      const isSel = selected ? selected.includes(String(v)) : true;
-      const tag = clickable ? "button" : "div";
-      const attrs = clickable ? `data-action="toggle-star" data-star="${v}" aria-pressed="${selected && selected.includes(String(v))}"` : "";
-      return `<${tag} class="col ${isSel ? "" : "dim"}" ${attrs} title="${v} Sterne: ${d.counts[i]} Bewertungen (${p} %)">
-        <span class="col-val">${d.valid ? `${p}&nbsp;%` : "–"}<small>${fmtInt(d.counts[i])}</small></span>
-        <span class="col-bar" style="height:${(p / maxPct) * 100}%;background:${SCALE_COLORS[v]}"></span>
-        <span class="col-label">${v} ★</span>
-      </${tag}>`;
-    })
-    .join("");
-  return `<div class="cols" role="group" aria-label="Verteilung der Sternebewertungen">${cols}
-      <div class="col col-missing" title="Ohne Sternebewertung – nicht im Nenner">
-        <span class="col-val">${fmtInt(d.missing)}<small>ohne Angabe</small></span>
-        <span class="col-bar hatch" style="height:${d.total ? Math.min(100, (d.missing / Math.max(1, d.valid)) * 100 / (maxPct / 100)) : 0}%"></span>
-        <span class="col-label">–</span>
-      </div>
-    </div>
-    <div class="col-groups" aria-hidden="true">
-      <span class="grp grp-critical" style="grid-column:1 / span 2">Kritisch · ${fmtPct(d.groups.critical.pct)}</span>
-      <span class="grp grp-neutral" style="grid-column:3">Mittel · ${fmtPct(d.groups.neutral.pct)}</span>
-      <span class="grp grp-positive" style="grid-column:4 / span 2">Positiv · ${fmtPct(d.groups.positive.pct)}</span>
-    </div>`;
-}
-
-function tileDistribution({ d }) {
-  return `
-    <p class="tile-intro">„${esc(QUESTION_TEXT.G01Q02)}“ – alle Antworten. Prozent bezogen auf ${fmtInt(d.valid)} Bewertungen; ${fmtInt(d.missing)} ohne Angabe (nicht im Nenner).</p>
-    ${starColumns(d)}
-    <p class="selection-rule"><a href="${href("bewertungen")}">Nach Sternen filtern →</a></p>`;
-}
-
-function tileAspects({ cur }) {
-  return `
-    <p class="tile-intro">Zustimmung zu fünf Aussagen (5-stufige Skala). Links Ablehnung, rechts Zustimmung.</p>
-    ${scaleLegend(AGREE_SCALE)}
-    <div class="aspects compact">${ITEMS.map((it) => aspectRow(it, itemDist(cur, it.code), { compact: true })).join("")}</div>
-    <p class="selection-rule"><a href="${href("bewertungen")}">Details und Fragetexte →</a></p>`;
-}
-
-function aspectRow(it, d, { compact = false, active = false } = {}) {
-  return `<div class="aspect ${active ? "is-active" : ""}">
-    <div class="aspect-head">
-      <h3 class="aspect-label">${esc(it.label)}</h3>
-      <span class="aspect-kpi">${d.showable ? `<b>${fmtPct(d.groups.positive.pct)}</b> Zustimmung` : lowNBadge(d.valid)}</span>
-    </div>
-    ${stackedBar(d, AGREE_SCALE, { label: it.label })}
-    <div class="aspect-foot">
-      <span>${groupsLine(d, AGREE_SCALE)}</span>
-      <span class="muted">n = ${fmtInt(d.valid)} · ohne Angabe ${fmtInt(d.missing)} ${d.showable && !d.reliable ? lowNBadge(d.valid) : ""}</span>
-    </div>
-    ${
-      compact
-        ? ""
-        : `<details class="question"><summary>Fragetext anzeigen</summary><p>„${esc(it.text)}“ <span class="muted">(Feld ${esc(it.field)})</span></p></details>`
-    }
-  </div>`;
-}
-
-/* ---------------- Ansicht: Bewertungen ---------------- */
+/* ---------------- Ansicht: Bewertungsübersicht ---------------- */
 
 function ratingFilters(params) {
+  const item = ITEMS.some((i) => i.code === params.aussage) ? params.aussage : "";
+  const wert = /^[1-5]$/.test(params.wert || "") ? params.wert : "";
   return {
-    stars: params.sterne ? params.sterne.split(",").filter((s) => /^[1-5]$|^fehlend$/.test(s)) : [],
-    item: ITEMS.some((i) => i.code === params.aussage) ? params.aussage : "",
-    cat: ["positive", "neutral", "critical", "missing"].includes(params.kategorie) ? params.kategorie : "",
+    stars: params.sterne ? params.sterne.split(",").filter((s) => /^[1-5]$/.test(s)) : [],
+    item: item && wert ? item : "",
+    value: item && wert ? Number(wert) : null,
+    focusItem: item, // Aussage ohne Wert: nur hervorheben (z. B. Link von der Übersicht)
   };
 }
 
-function applyRatingFilters(recs, f, { skipStars = false } = {}) {
+function applyRatingFilters(recs, f, { skipStars = false, skipItem = false } = {}) {
   return recs.filter((r) => {
-    if (!skipStars && f.stars.length) {
-      const key = r.stars == null ? "fehlend" : String(r.stars);
-      if (!f.stars.includes(key)) return false;
-    }
-    if (f.item && f.cat) {
-      const v = r.items[f.item];
-      if (f.cat === "missing") return v == null;
-      if (v == null || !AGREE_SCALE.groups[f.cat].values.includes(v)) return false;
-    }
+    if (!skipStars && f.stars.length && !f.stars.includes(String(r.stars))) return false;
+    if (!skipItem && f.item && r.items[f.item] !== f.value) return false;
     return true;
   });
+}
+
+function ratingChips(f) {
+  const chips = [];
+  if (f.stars.length)
+    chips.push(`<span class="fchip">Sterne: ${f.stars.map((s) => s + " ★").join(", ")} <button type="button" data-action="clear-local" data-keys="sterne" aria-label="Sterne-Filter entfernen">×</button></span>`);
+  if (f.item) {
+    const it = ITEMS.find((i) => i.code === f.item);
+    chips.push(`<span class="fchip">${esc(it.label)}: „${esc(AGREE_SCALE.labels[f.value])}“ <button type="button" data-action="clear-local" data-keys="aussage,wert" aria-label="Filter ${esc(it.label)} entfernen">×</button></span>`);
+  }
+  return chips;
 }
 
 function viewRatings(st) {
   const base = baseFilter(st, st.period);
   const f = ratingFilters(st.params);
-  const forStars = applyRatingFilters(base, f, { skipStars: true });
   const recs = applyRatingFilters(base, f);
-  const d = starDist(forStars);
-  const active = f.stars.length || (f.item && f.cat);
-  const itemLabel = f.item ? ITEMS.find((i) => i.code === f.item).label : "";
-  const localChips = [
-    f.stars.length ? `Sterne: ${f.stars.map((s) => (s === "fehlend" ? "ohne Angabe" : s + " ★")).join(", ")}` : "",
-    f.item && f.cat ? `${itemLabel}: ${f.cat === "missing" ? "ohne Angabe" : AGREE_SCALE.groups[f.cat].label}` : "",
-  ].filter(Boolean);
+  const dStars = starDist(applyRatingFilters(base, f, { skipStars: true }));
+  const chips = ratingChips(f);
+  const listParams = { sterne: st.params.sterne, aussage: f.item, wert: f.value };
 
   return `
-    <div class="view-head">
-      <div>
-        <h2 class="view-title">Bewertungen</h2>
-        <p class="view-desc">Strukturierte Antworten: Sternebewertung zur Gesamtzufriedenheit und Zustimmung zu fünf Aussagen. Offene Kommentare finden Sie unter <a href="${href("textfeedback")}">Textfeedback</a>.</p>
-        ${contextBar(st, base.length, starDist(base).valid)}
-      </div>
+    ${pageHead(st, "Bewertungsübersicht", base.length, {
+      actions: `<a class="btn" href="${href("einzelbewertungen", listParams)}">Einzelbewertungen anzeigen (${fmtInt(recs.length)}) →</a>`,
+    })}
+    <div class="filter-line" role="status">
+      ${
+        chips.length
+          ? `<span class="filter-line-label">Gefiltert:</span> ${chips.join("")} <button type="button" class="btn-link" data-action="clear-local" data-keys="sterne,aussage,wert">Zurücksetzen</button> <span class="muted">· ${fmtInt(recs.length)} von ${fmtInt(base.length)} Rückmeldungen</span>`
+          : `<span class="muted">Balken oder Säule anklicken, um nach dieser Antwort zu filtern.</span>`
+      }
     </div>
 
-    <section class="card local-filters" aria-labelledby="lf-title">
-      <h3 id="lf-title" class="card-title">Filter für diesen Bereich <span class="scope-tag">gilt nur für „Bewertungen“</span></h3>
-      <div class="lf-row">
-        <fieldset class="chip-group">
-          <legend>Sterne (Gesamtzufriedenheit)</legend>
-          ${STAR_SCALE.values
-            .map((v) => `<button class="chip" data-action="toggle-star" data-star="${v}" aria-pressed="${f.stars.includes(String(v))}">${v} ★</button>`)
-            .join("")}
-          <button class="chip" data-action="toggle-star" data-star="fehlend" aria-pressed="${f.stars.includes("fehlend")}">ohne Angabe</button>
-        </fieldset>
-        <div class="lf-item">
-          <label>Aussage
-            <select data-action="rf-item">
-              <option value="">– keine –</option>
-              ${ITEMS.map((i) => `<option value="${i.code}" ${f.item === i.code ? "selected" : ""}>${esc(i.label)}</option>`).join("")}
-            </select>
-          </label>
-          <label>Antwortkategorie
-            <select data-action="rf-cat" ${f.item ? "" : "disabled"}>
-              <option value="">– alle –</option>
-              ${["positive", "neutral", "critical"].map((k) => `<option value="${k}" ${f.cat === k ? "selected" : ""}>${AGREE_SCALE.groups[k].label} (${AGREE_SCALE.groups[k].values.join("+")})</option>`).join("")}
-              <option value="missing" ${f.cat === "missing" ? "selected" : ""}>ohne Angabe</option>
-            </select>
-          </label>
-        </div>
-      </div>
-      <p class="lf-note">Dienststelle, Service und Zeitraum stellen Sie oben ein – diese Filter gelten im gesamten Dashboard.</p>
-      ${
-        active
-          ? `<div class="lf-active" role="status"><span>Aktiv: ${localChips.map(esc).join(" · ")} → <b>${fmtInt(recs.length)}</b> von ${fmtInt(base.length)} Rückmeldungen</span>
-             <button class="btn-mini" data-action="rf-reset">Bereichsfilter zurücksetzen</button></div>`
-          : ""
-      }
-    </section>
-
-    <section class="split">
+    <section class="ratings-grid">
       <article class="card">
-        <h3 class="card-title">Gesamtzufriedenheit (Sterne)</h3>
-        <p class="tile-intro">„${esc(QUESTION_TEXT.G01Q02)}“ ${f.item && f.cat ? `– nur Rückmeldungen mit ${esc(itemLabel)} = ${f.cat === "missing" ? "ohne Angabe" : AGREE_SCALE.groups[f.cat].label}` : ""}</p>
-        <div class="dist-summary">${d.showable ? `<span class="value">${fmtMean(d.mean)}</span> ${starsHtml(d.mean, "lg")} <span class="muted">von 5 · N = ${fmtInt(d.valid)}</span>` : lowNBadge(d.valid) || "Keine Daten"}</div>
-        ${starColumns(d, { selected: f.stars.length ? f.stars : null, clickable: true })}
-        <p class="selection-rule">Säule anklicken, um nach Sternen zu filtern. Prozent bezogen auf ${fmtInt(d.valid)} Bewertungen mit Sternen; „ohne Angabe“ zählt nicht in den Nenner.
-          Positiv = 4 + 5 Sterne, Mittel = 3, Kritisch = 1 + 2.</p>
+        <div class="card-head"><h3 class="card-title">Gesamtzufriedenheit</h3>${info(
+          `„${esc(QUESTION_TEXT.G01Q02)}“<br>${missingNote(dStars)}${f.item ? "<br>Berücksichtigt den Filter der Detailbewertung." : ""}`,
+          "Erläuterung zur Gesamtzufriedenheit"
+        )}</div>
+        ${starSummary(dStars)}
+        ${starBars(dStars, { clickable: true, selected: f.stars })}
+        ${groupLine(dStars)}
       </article>
-      <article class="card">
-        <h3 class="card-title">Bewertete Aspekte (Zustimmung)</h3>
-        <p class="tile-intro">„${esc(QUESTION_TEXT.G02Q03)}“ ${active ? `– für die ${fmtInt(recs.length)} gefilterten Rückmeldungen` : ""}</p>
-        ${scaleLegend(AGREE_SCALE)}
-        <div class="aspects">${ITEMS.map((it) => aspectRow(it, itemDist(recs, it.code), { active: it.code === f.item })).join("")}</div>
-      </article>
-    </section>
-
-    ${responsesTable(recs, "Einzelbewertungen")}`;
+      ${(() => {
+        const dists = ITEMS.map((it) => itemDist(applyRatingFilters(base, f, { skipItem: f.item === it.code }), it.code));
+        const sharedMax = Math.max(1, ...dists.flatMap((d) => d.pct.map((p) => p || 0)));
+        return ITEMS.map((it, i) => aspectCard(it, dists[i], f, sharedMax)).join("");
+      })()}
+    </section>`;
 }
 
-function responsesTable(recs, title) {
+/* Detailbewertung als fünf Säulen (1 = stimme gar nicht zu … 5 = stimme voll und ganz zu). */
+/* sharedMax: gemeinsame Höhenskala für alle Aspekte, damit Säulen vergleichbar sind. */
+function aspectCard(it, d, f, sharedMax) {
+  const selVal = f.item === it.code ? f.value : null;
+  const max = sharedMax;
+  const cols = AGREE_SCALE.values
+    .map((v, i) => {
+      const p = d.pct[i] ?? 0;
+      const isSel = selVal === v;
+      return `<button type="button" class="acol ${selVal && !isSel ? "dim" : ""}" data-action="toggle-agree" data-item="${it.code}" data-value="${v}" aria-pressed="${isSel}"
+          aria-label="${esc(it.label)}: ${esc(AGREE_SCALE.labels[v])} ${d.valid ? p + " Prozent" : "keine Daten"}, ${d.counts[i]} Antworten – filtern">
+        <span class="acol-val">${d.valid ? `${p}&nbsp;%` : "–"}</span>
+        <span class="acol-bar-wrap"><span class="acol-bar" style="height:${(p / max) * 100}%;background:${SCALE_COLORS[v]}"></span></span>
+        <span class="acol-label">${AGREE_SHORT[v]}</span>
+      </button>`;
+    })
+    .join("");
+  return `<article class="card aspect ${f.focusItem === it.code ? "is-focus" : ""}">
+    <div class="card-head"><h3 class="card-title">${esc(it.label)}</h3>${info(
+      `Aussage: „${esc(it.text)}“<br>Säulen: Ich stimme … zu (gar nicht, eher nicht, teils/teils, eher, voll und ganz).<br>Zustimmung = „eher“ + „voll und ganz“. ${missingNote(d, "Antwort auf diese Aussage")}`,
+      `Erläuterung zu ${it.label}`
+    )}</div>
+    <p class="aspect-kpi">${d.showable ? `<b>${fmtPct(d.groups.positive.pct)}</b> Zustimmung` : lowNBadge(d.valid)} <span class="muted">· n = ${fmtInt(d.valid)}</span></p>
+    <div class="acols" role="group" aria-label="${esc(it.label)}: Verteilung">${cols}</div>
+    <p class="acol-caption" aria-hidden="true">Ich stimme … zu</p>
+  </article>`;
+}
+
+/* ---------------- Ansicht: Einzelbewertungen ---------------- */
+
+function viewSingle(st) {
+  const base = baseFilter(st, st.period);
+  const f = ratingFilters(st.params);
+  const recs = applyRatingFilters(base, f);
+  const chips = ratingChips(f);
+  const back = `<a class="back-link" href="${href("bewertungen", { sterne: st.params.sterne, aussage: f.item, wert: f.value })}">← Zurück zur Bewertungsübersicht</a>`;
+  return `
+    ${pageHead(st, "Einzelbewertungen", base.length, { back })}
+    ${chips.length ? `<div class="filter-line" role="status"><span class="filter-line-label">Gefiltert:</span> ${chips.join("")} <button type="button" class="btn-link" data-action="clear-local" data-keys="sterne,aussage,wert">Zurücksetzen</button></div>` : ""}
+    ${responsesTable(recs)}`;
+}
+
+function responsesTable(recs) {
   const sorted = [...recs].sort((a, b) => b.date - a.date);
-  const shown = sorted.slice(0, ui.tablePage * 25);
+  const shown = sorted.slice(0, ui.tablePage * PAGE_SIZE);
   const rows = shown
     .map((r) => {
       const answered = ITEMS.filter((i) => r.items[i.code] != null);
       const agree = answered.filter((i) => r.items[i.code] >= 4).length;
-      const hasText = r.textNegative || r.textPositive;
+      const texts = [r.textPositive ? "Lob" : "", r.textNegative ? "Kritik" : ""].filter(Boolean);
       return `<tr>
         <td>${fmtDate(r.date)}</td>
         <td>${esc(r.service || "–")}<br><small class="muted">${esc(r.office)}</small></td>
         <td>${starsExact(r.stars)}</td>
-        <td>${answered.length ? `${agree} von ${answered.length} Aussagen` : "–"}</td>
-        <td>${hasText ? `<span class="text-flag">💬 ${[r.textNegative ? "Kritik" : "", r.textPositive ? "Lob" : ""].filter(Boolean).join(" + ")}</span>` : `<span class="muted">–</span>`}</td>
-        <td><button class="btn-mini" data-action="detail" data-id="${esc(r.id)}" aria-label="Rückmeldung vom ${fmtDate(r.date)} öffnen">Details</button></td>
+        <td>${answered.length ? `${agree} von ${answered.length}` : "–"}</td>
+        <td>${texts.length ? texts.join(" + ") : `<span class="muted">–</span>`}</td>
+        <td><button type="button" class="btn-mini" data-action="detail" data-id="${esc(r.id)}" aria-label="Rückmeldung vom ${fmtDate(r.date)} öffnen">Details</button></td>
       </tr>`;
     })
     .join("");
   return `<article class="card">
-    <h3 class="card-title">${esc(title)} (${fmtInt(recs.length)})</h3>
+    <h3 class="card-title">${fmtInt(recs.length)} Rückmeldungen</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th scope="col">Datum</th><th scope="col">Service / Dienststelle</th><th scope="col">Sterne</th><th scope="col">Zustimmung (4–5)</th><th scope="col">Kommentar</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="6" class="empty">Keine Rückmeldungen für diese Filterkombination.</td></tr>`}</tbody>
+        <thead><tr><th scope="col">Datum</th><th scope="col">Service</th><th scope="col">Sterne</th><th scope="col">Zustimmung ${info("Anzahl der Aussagen mit „stimme eher zu“ oder „stimme voll und ganz zu“ von allen beantworteten Aussagen.", "Erläuterung zur Spalte Zustimmung")}</th><th scope="col">Kommentar</th><th scope="col"><span class="sr-only">Aktion</span></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="empty">Keine Rückmeldungen für diese Auswahl.</td></tr>`}</tbody>
       </table>
     </div>
-    ${shown.length < sorted.length ? `<p class="more"><button class="btn secondary" data-action="more-rows">Weitere 25 anzeigen (${fmtInt(shown.length)} von ${fmtInt(sorted.length)})</button></p>` : ""}
+    ${shown.length < sorted.length ? `<p class="more"><button type="button" class="btn secondary" data-action="more-rows">Weitere ${PAGE_SIZE} anzeigen (${fmtInt(shown.length)} von ${fmtInt(sorted.length)})</button></p>` : ""}
   </article>`;
 }
 
 /* ---------------- Ansicht: Textfeedback ---------------- */
 
-function viewTexts(st) {
-  const base = baseFilter(st, st.period);
-  const art = st.params.art === "lob" ? "lob" : "kritik";
-  const field = art === "lob" ? "textPositive" : "textNegative";
-  const themeId = THEMES.some((t) => t.id === st.params.thema) || st.params.thema === "ohne" ? st.params.thema : "";
-  const stars = st.params.sterne ? st.params.sterne.split(",").filter((s) => /^[1-5]$/.test(s)) : [];
-  const withText = base.filter((r) => r[field]);
-  const nNeg = base.filter((r) => r.textNegative).length;
-  const nPos = base.filter((r) => r.textPositive).length;
-  const themes = art === "kritik" ? themeCounts(base) : null;
-  let list = withText.filter((r) => !stars.length || stars.includes(String(r.stars)));
-  if (art === "kritik" && themeId) {
-    list = list.filter((r) => {
-      const ids = matchThemes(r.textNegative);
-      return themeId === "ohne" ? !ids.length : ids.includes(themeId);
-    });
-  }
-  list.sort((a, b) => b.date - a.date);
-
-  return `
-    <div class="view-head">
-      <div>
-        <h2 class="view-title">Textfeedback</h2>
-        <p class="view-desc">Offene, schriftliche Rückmeldungen. Jeder Kommentar gehört zu einer Rückmeldung mit Sternebewertung – diese wird beim Kommentar angezeigt. Strukturierte Bewertungen finden Sie unter <a href="${href("bewertungen")}">Bewertungen</a>.</p>
-        ${contextBar(st, base.length)}
-      </div>
-    </div>
-    <div class="tabs" role="tablist" aria-label="Art des Textfeedbacks">
-      <a role="tab" aria-selected="${art === "kritik"}" class="tab ${art === "kritik" ? "is-active" : ""}" href="${href("textfeedback", { art: "kritik" })}">Kritik: „Was war besonders schlecht?“ <span class="count">${fmtInt(nNeg)}</span></a>
-      <a role="tab" aria-selected="${art === "lob"}" class="tab ${art === "lob" ? "is-active" : ""}" href="${href("textfeedback", { art: "lob" })}">Lob: „Was hat besonders gut gefallen?“ <span class="count">${fmtInt(nPos)}</span></a>
-    </div>
-    <section class="card local-filters">
-      <p class="tile-intro">Frage (${art === "lob" ? "G01Q05" : "G01Q04"}): „${esc(art === "lob" ? QUESTION_TEXT.G01Q05 : QUESTION_TEXT.G01Q04)}“
-      ${art === "kritik" ? " Annahme: wird nur bei weniger als 5 Sternen angezeigt." : ""}</p>
-      ${
-        themes
-          ? `<fieldset class="chip-group"><legend>Thema (Stichwort-Zuordnung, Mehrfachzuordnung möglich)</legend>
-              <a class="chip" aria-pressed="${!themeId}" href="${href("textfeedback", { art, sterne: stars.join(",") })}">Alle</a>
-              ${themes.list.map((t) => `<a class="chip" aria-pressed="${themeId === t.id}" href="${href("textfeedback", { art, thema: t.id, sterne: stars.join(",") })}">${esc(t.label)} <span class="count">${t.n}</span></a>`).join("")}
-              <a class="chip" aria-pressed="${themeId === "ohne"}" href="${href("textfeedback", { art, thema: "ohne", sterne: stars.join(",") })}">Ohne Thema <span class="count">${themes.unassigned}</span></a>
-            </fieldset>
-            <details class="question"><summary>Wie werden Themen zugeordnet?</summary>
-              <p>Ein Kommentar wird einem Thema zugeordnet, wenn er eines der hinterlegten Stichwörter enthält. Die Liste ist unter <a href="${href("daten")}#themen">Daten &amp; Methodik</a> einsehbar. Es gibt keine automatische Zusammenfassung.</p></details>`
-          : ""
-      }
-      <div class="lf-row">
-        <fieldset class="chip-group"><legend>Sterne der zugehörigen Bewertung</legend>
-          ${STAR_SCALE.values
-            .map((v) => {
-              const next = stars.includes(String(v)) ? stars.filter((s) => s !== String(v)) : [...stars, String(v)];
-              return `<a class="chip" aria-pressed="${stars.includes(String(v))}" href="${href("textfeedback", { art, thema: themeId, sterne: next.sort().join(",") })}">${v} ★</a>`;
-            })
-            .join("")}
-        </fieldset>
-        <label class="search-label">Suche im Text
-          <input type="search" class="search" id="text-search" value="${esc(ui.textSearch)}" placeholder="z. B. Upload" />
-        </label>
-      </div>
-    </section>
-    <div id="text-results">${textResults(list, field)}</div>`;
+function textFilters(params) {
+  return {
+    stars: params.sterne ? params.sterne.split(",").filter((s) => /^[1-5]$/.test(s)) : [],
+    theme: THEMES.some((t) => t.id === params.thema) || params.thema === "ohne" ? params.thema : "",
+  };
 }
 
-function textResults(list, field) {
+function viewTexts(st) {
+  const base = baseFilter(st, st.period);
+  const f = textFilters(st.params);
+  const themeLabel = f.theme === "ohne" ? "ohne Thema" : f.theme ? THEMES.find((t) => t.id === f.theme).label : "";
+  const active = f.stars.length || f.theme || ui.textSearch.trim();
+  return `
+    ${pageHead(st, "Textfeedback", base.length)}
+    <section class="text-filters" aria-label="Filter für Lob und Kritik">
+      <fieldset class="chip-group">
+        <legend>Sterne</legend>
+        ${[5, 4, 3, 2, 1]
+          .map((v) => `<button type="button" class="chip" data-action="toggle-star" data-star="${v}" aria-pressed="${f.stars.includes(String(v))}">${v} ★</button>`)
+          .join("")}
+      </fieldset>
+      <label class="search-label"><span>Suche</span>
+        <input type="search" class="search" id="text-search" value="${esc(ui.textSearch)}" placeholder="Stichwort" />
+      </label>
+      <div class="filter-line text-filter-line" role="status">
+        ${f.theme ? `<span class="fchip">Thema: ${esc(themeLabel)} <small>(nur Kritik)</small> <button type="button" data-action="clear-local" data-keys="thema" aria-label="Themenfilter entfernen">×</button></span>` : ""}
+        ${active ? `<button type="button" class="btn-link" data-action="reset-text">Filter zurücksetzen</button>` : ""}
+      </div>
+    </section>
+    <div id="text-results">${textColumns(base, f)}</div>`;
+}
+
+function textColumns(base, f) {
   const q = ui.textSearch.trim().toLowerCase();
-  const filteredList = q ? list.filter((r) => r[field].toLowerCase().includes(q)) : list;
-  const shown = filteredList.slice(0, ui.tablePage * 24);
-  return `<p class="result-count" role="status">${fmtInt(filteredList.length)} Kommentare</p>
-    <div class="comment-grid">${
+  const common = (r, field) => r[field] && (!f.stars.length || f.stars.includes(String(r.stars))) && (!q || r[field].toLowerCase().includes(q));
+  const lob = base.filter((r) => common(r, "textPositive")).sort((a, b) => b.date - a.date);
+  let kritik = base.filter((r) => common(r, "textNegative"));
+  if (f.theme) {
+    kritik = kritik.filter((r) => {
+      const ids = matchThemes(r.textNegative);
+      return f.theme === "ohne" ? !ids.length : ids.includes(f.theme);
+    });
+  }
+  kritik.sort((a, b) => b.date - a.date);
+  return `<div class="text-columns">
+    ${textSection("lob", "Lob", "+", lob, "textPositive", QUESTION_TEXT.G01Q05)}
+    ${textSection("kritik", "Kritik", "−", kritik, "textNegative", QUESTION_TEXT.G01Q04, "Wird angezeigt, wenn nicht 5 Sterne vergeben wurden (Annahme).")}
+  </div>`;
+}
+
+function textSection(key, title, symbol, list, field, question, note = "") {
+  const shown = list.slice(0, ui.textPages[key] * TEXT_PAGE_SIZE);
+  return `<section class="text-section text-${key}" aria-labelledby="ts-${key}">
+    <header class="text-section-head">
+      <span class="text-symbol" aria-hidden="true">${symbol}</span>
+      <h3 id="ts-${key}">${title}</h3>
+      <span class="text-count">${fmtInt(list.length)} Kommentare</span>
+      ${info(`Frage: „${esc(question)}“${note ? "<br>" + esc(note) : ""}<br>Jeder Kommentar zeigt die Sternebewertung derselben Rückmeldung.`, `Erläuterung zu ${title}`)}
+    </header>
+    <div class="comment-list">${
       shown
         .map((r) => {
           const tags = field === "textNegative" ? matchThemes(r.textNegative).map((id) => THEMES.find((t) => t.id === id).label) : [];
-          return `<button class="card comment clickable" data-action="detail" data-id="${esc(r.id)}">
+          return `<button type="button" class="comment" data-action="detail" data-id="${esc(r.id)}">
             <span class="comment-text">${esc(r[field])}</span>
+            <span class="meta">${starsExact(r.stars)} · ${esc(r.service)} · ${fmtDate(r.date)}</span>
             ${tags.length ? `<span class="tags">${tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span>` : ""}
-            <span class="quote-meta">Bewertung: ${starsExact(r.stars)} · ${esc(r.service)} · ${esc(r.office)} · ${fmtDate(r.date)}</span>
           </button>`;
         })
         .join("") || `<p class="empty">Keine Kommentare für diese Auswahl.</p>`
     }</div>
-    ${shown.length < filteredList.length ? `<p class="more"><button class="btn secondary" data-action="more-rows">Weitere anzeigen (${fmtInt(shown.length)} von ${fmtInt(filteredList.length)})</button></p>` : ""}`;
+    ${shown.length < list.length ? `<p class="more"><button type="button" class="btn secondary" data-action="more-text" data-key="${key}">Weitere anzeigen (${fmtInt(shown.length)} von ${fmtInt(list.length)})</button></p>` : ""}
+  </section>`;
 }
 
-/* ---------------- Ansicht: Services & Dienststellen ---------------- */
+/* ---------------- Ansicht: Services ---------------- */
 
 function viewServices(st) {
   const base = applyFilters(DATA.records, { allowedOffices: allowedOffices(), range: st.period, office: st.office });
   const sort = ["asc", "desc", "n", "name"].includes(st.params.sortierung) ? st.params.sortierung : "asc";
   const offices = st.office !== "Alle" ? [st.office] : allowedOffices();
-  const all = starDist(base);
   const sorter = {
     asc: (a, b) => a.mean - b.mean,
     desc: (a, b) => b.mean - a.mean,
     n: (a, b) => b.n - a.n,
     name: (a, b) => a.service.localeCompare(b.service, "de"),
   }[sort];
-  const groups = offices
+  const sections = offices
     .map((office) => {
       const recs = base.filter((r) => r.office === office);
       const od = starDist(recs);
       const rows = serviceTable(recs, CATALOG.find((c) => c.office === office).services);
-      const reliable = rows.filter((r) => r.reliable).sort(sorter);
-      const low = rows.filter((r) => !r.reliable).sort((a, b) => b.n - a.n);
-      return `<section class="card office-block">
-        <div class="office-head">
-          <h3 class="card-title">${esc(office)}</h3>
-          <span>${od.showable ? `Ø ${fmtMean(od.mean)} ${starsHtml(od.mean)}` : "–"} · N = ${fmtInt(od.valid)} ${lowNBadge(od.valid)}</span>
-          <a class="btn-mini" href="${href("start", { dienststelle: office, service: "" })}">Übersicht dieser Dienststelle</a>
-        </div>
-        <div class="svc-compare">${[...reliable, ...low].map((r) => serviceDotRow(r, all.mean)).join("")}</div>
-        ${dotAxis()}
-        <details class="table-alt"><summary>Werte als Tabelle</summary>
-          <table><thead><tr><th scope="col">Service</th><th scope="col">Ø Sterne</th><th scope="col">N</th><th scope="col">Positiv (4–5)</th><th scope="col">Kritisch (1–2)</th><th scope="col">Hinweis</th></tr></thead>
-          <tbody>${[...reliable, ...low].map((r) => `<tr><td>${esc(r.service)}</td><td>${r.showable ? fmtMean(r.mean) : "–"}</td><td>${fmtInt(r.n)}</td><td>${r.showable ? fmtPct(r.positive) : "–"}</td><td>${r.showable ? fmtPct(r.critical) : "–"}</td><td>${r.reliable ? "" : r.showable ? "geringe Fallzahl" : "zu wenige Antworten"}</td></tr>`).join("")}</tbody></table>
-        </details>
+      const ordered = [...rows.filter((r) => r.reliable).sort(sorter), ...rows.filter((r) => !r.reliable).sort((a, b) => b.n - a.n)];
+      return `<section class="office-section" aria-labelledby="office-${esc(office)}">
+        <header class="office-head">
+          <h3 id="office-${esc(office)}">${esc(office)}</h3>
+          <span class="office-sum">${od.showable ? `Ø <b>${fmtMean(od.mean)} ★</b>` : "–"} · N = ${fmtInt(od.valid)} · ${rows.length} Services</span>
+        </header>
+        <div class="card">${serviceBars(ordered)}</div>
       </section>`;
     })
     .join("");
+  const all = starDist(base);
   return `
-    <div class="view-head">
-      <div>
-        <h2 class="view-title">Services &amp; Dienststellen</h2>
-        <p class="view-desc">Vergleich der Online-Services anhand der Ø-Sternebewertung und Fallzahl, gegliedert nach Dienststellen. Es werden Services verglichen, keine Personen.</p>
-        ${contextBar({ ...st, service: "Alle" }, base.length, all.valid)}
-      </div>
-      <label class="sort-label">Sortierung
+    ${pageHead({ ...st, service: "Alle" }, "Services", base.length, {
+      actions: `<label class="sort-label">Sortierung
         <select data-action="svc-sort">
-          <option value="asc" ${sort === "asc" ? "selected" : ""}>Ø Sterne – niedrigste zuerst</option>
-          <option value="desc" ${sort === "desc" ? "selected" : ""}>Ø Sterne – höchste zuerst</option>
-          <option value="n" ${sort === "n" ? "selected" : ""}>Fallzahl – größte zuerst</option>
-          <option value="name" ${sort === "name" ? "selected" : ""}>Name (A–Z)</option>
-        </select>
-      </label>
-    </div>
-    ${st.service !== "Alle" ? `<p class="notice">Hinweis: Der Service-Filter „${esc(st.service)}“ wird hier ignoriert, damit alle Services der Dienststelle vergleichbar bleiben.</p>` : ""}
-    <p class="notice">Alle Werte auf derselben Skala von 1 bis 5 Sternen. Senkrechte Linie: Ø über alle angezeigten Services (${fmtMean(all.mean)}). Services mit weniger als ${MIN_N_RELIABLE} Bewertungen stehen unten und sind markiert. Zeile anklicken: zugrunde liegende Rückmeldungen.</p>
-    ${groups}`;
-}
-
-/* ---------------- Ansicht: Einzelrückmeldungen (Drilldown) ---------------- */
-
-function viewResponses(st) {
-  let recs = baseFilter(st, st.period);
-  const p = st.params;
-  const ctx = [];
-  if (p.svc && SERVICE_TO_OFFICE[p.svc]) {
-    recs = recs.filter((r) => r.service === p.svc);
-    ctx.push(`Service: ${p.svc}`);
-  }
-  const f = ratingFilters(p);
-  recs = applyRatingFilters(recs, f);
-  if (f.stars.length) ctx.push(`Sterne: ${f.stars.join(", ")}`);
-  if (f.item && f.cat) ctx.push(`${ITEMS.find((i) => i.code === f.item).label}: ${AGREE_SCALE.groups[f.cat]?.label || "ohne Angabe"}`);
-  const back = VIEWS[p.zurueck] ? p.zurueck : "start";
-  return `
-    <div class="view-head">
-      <div>
-        <a class="back-link" href="${href(back)}">← Zurück zu „${esc(VIEWS[back])}“</a>
-        <h2 class="view-title">Einzelrückmeldungen</h2>
-        ${ctx.length ? `<p class="view-desc">Auswahl: <b>${ctx.map(esc).join(" · ")}</b></p>` : ""}
-        ${contextBar(st, recs.length)}
-      </div>
-    </div>
-    ${p.svc ? `<section class="split">${(() => {
-      const d = starDist(recs);
-      return `<article class="card"><h3 class="card-title">Sterne</h3><div class="dist-summary">${d.showable ? `<span class="value">${fmtMean(d.mean)}</span> ${starsHtml(d.mean, "lg")}` : ""} <span class="muted">N = ${fmtInt(d.valid)}</span> ${lowNBadge(d.valid)}</div>${starColumns(d)}</article>
-        <article class="card"><h3 class="card-title">Bewertete Aspekte</h3>${scaleLegend(AGREE_SCALE)}<div class="aspects compact">${ITEMS.map((it) => aspectRow(it, itemDist(recs, it.code), { compact: true })).join("")}</div></article>`;
-    })()}</section>` : ""}
-    ${responsesTable(recs, "Rückmeldungen")}`;
+          <option value="asc" ${sort === "asc" ? "selected" : ""}>Niedrigste Ø zuerst</option>
+          <option value="desc" ${sort === "desc" ? "selected" : ""}>Höchste Ø zuerst</option>
+          <option value="n" ${sort === "n" ? "selected" : ""}>Meiste Bewertungen</option>
+          <option value="name" ${sort === "name" ? "selected" : ""}>Name A–Z</option>
+        </select></label>`,
+    })}
+    <p class="filter-line"><span class="muted">Ø Sternebewertung je Service, Skala 0–5 Sterne · Ø aller Services: <b>${fmtMean(all.mean)} ★</b></span>${info(
+      `Balkenlänge = Ø Sterne (1–5) auf einer gemeinsamen Skala von 0 bis 5. N = Anzahl Bewertungen. Services mit weniger als ${MIN_N_RELIABLE} Bewertungen stehen unten, sind schraffiert und markiert. Ein Klick öffnet die Bewertungsübersicht des Services. Es werden Services verglichen, keine Personen.${st.service !== "Alle" ? `<br>Der Service-Filter „${esc(st.service)}“ wird hier nicht angewendet, damit alle Services vergleichbar bleiben.` : ""}`,
+      "Erläuterung zum Servicevergleich"
+    )}</p>
+    ${sections}`;
 }
 
 /* ---------------- Ansicht: Daten & Methodik ---------------- */
@@ -889,11 +702,7 @@ function viewData(st) {
   const incomplete = all.filter((r) => !r.complete).length;
   const unassigned = all.filter((r) => r.complete && r.office === UNASSIGNED_OFFICE).length;
   return `
-    <div class="view-head"><div>
-      <h2 class="view-title">Daten &amp; Methodik</h2>
-      <p class="view-desc">Datenquelle, Definitionen der Kennzahlen, Zuordnungen sowie Import und Export.</p>
-    </div></div>
-
+    ${pageHead(st, "Daten & Methodik", baseFilter(st, st.period).length)}
     <section class="card">
       <h3 class="card-title">Datenquelle</h3>
       <dl class="kv">
@@ -903,104 +712,84 @@ function viewData(st) {
         <dt>Ohne Dienststelle</dt><dd>${fmtInt(unassigned)} Rückmeldungen mit Service ohne Katalog-Zuordnung</dd>
       </dl>
       <div class="import">
-        <label class="btn secondary file-btn">CSV-Export des Fragebogens laden
-          <input type="file" accept=".csv,text/csv" id="csv-input" />
-        </label>
-        ${DATA.source !== "sample" ? `<button class="btn ghost" data-action="use-sample">Zurück zu Beispieldaten</button>` : ""}
-        <p class="muted">Erwartet: Spaltenüberschriften „Feldcode + Fragetext“ (z. B. <code>G02Q03[SQ002]. Die einzelnen …</code>). Antwortwerte 1–5, „A1“–„A5“ oder die Textlabels der Zustimmungsskala werden erkannt.</p>
+        <label class="btn secondary file-btn">CSV-Export laden<input type="file" accept=".csv,text/csv" id="csv-input" /></label>
+        ${DATA.source !== "sample" ? `<button type="button" class="btn-link" data-action="use-sample">Zurück zu Beispieldaten</button>` : ""}
+        ${info("Erwartet: Spaltenüberschriften „Feldcode + Fragetext“ (z. B. <code>G02Q03[SQ002]. Die einzelnen …</code>). Antwortwerte 1–5, „A1“–„A5“ oder die Textlabels der Zustimmungsskala werden erkannt.", "Erläuterung zum Import")}
         <div id="import-msg" role="status"></div>
       </div>
     </section>
 
     <section class="card" id="definitionen">
-      <h3 class="card-title">Definitionen der Kennzahlen</h3>
+      <h3 class="card-title">Definitionen</h3>
       <table>
-        <thead><tr><th scope="col">Kennzahl</th><th scope="col">Berechnung</th><th scope="col">Nenner</th></tr></thead>
+        <thead><tr><th scope="col">Kennzahl</th><th scope="col">Berechnung</th><th scope="col">Bezugsgröße</th></tr></thead>
         <tbody>
-          <tr><td>Grundgesamtheit (N)</td><td>Abgeschlossene Fragebögen (Abgabedatum <code>submitdate</code> vorhanden) im Zeitraum und Filter</td><td>–</td></tr>
+          <tr><td>N</td><td>Abgeschlossene Fragebögen (<code>submitdate</code> vorhanden) im Zeitraum und Filter</td><td>–</td></tr>
           <tr><td>Ø Gesamtzufriedenheit</td><td>Mittelwert der Sterne 1–5 aus <code>G01Q02</code></td><td>Rückmeldungen mit Sternebewertung</td></tr>
-          <tr><td>Positive Bewertungen</td><td>Anteil 4 oder 5 Sterne (früher „Top-2-Box“)</td><td>Rückmeldungen mit Sternebewertung</td></tr>
-          <tr><td>Mittlere Bewertungen</td><td>Anteil 3 Sterne</td><td>Rückmeldungen mit Sternebewertung</td></tr>
-          <tr><td>Kritische Bewertungen</td><td>Anteil 1 oder 2 Sterne (früher „Bottom-2-Box“)</td><td>Rückmeldungen mit Sternebewertung</td></tr>
-          <tr><td>Zustimmung / Ablehnung</td><td>Anteil „stimme eher zu“ + „stimme voll und ganz zu“ bzw. „stimme überhaupt nicht zu“ + „stimme eher nicht zu“ je Aussage <code>G02Q03[…]</code></td><td>Antworten auf diese Aussage (ohne „keine Angabe“)</td></tr>
-          <tr><td>Veränderung</td><td>Differenz zum unmittelbar vorhergehenden Zeitraum gleicher Länge; Anteile in Prozentpunkten</td><td>wie oben, je Zeitraum</td></tr>
-          <tr><td>Geringe Fallzahl</td><td>Hinweis unter ${MIN_N_RELIABLE} Antworten; unter ${MIN_N_SHOW} Antworten keine Werte</td><td>–</td></tr>
+          <tr><td>Positive Bewertungen</td><td>Anteil 4 oder 5 Sterne</td><td>Rückmeldungen mit Sternebewertung</td></tr>
+          <tr><td>Mittlere / Kritische Bewertungen</td><td>Anteil 3 Sterne / 1 oder 2 Sterne</td><td>Rückmeldungen mit Sternebewertung</td></tr>
+          <tr><td>Zustimmung</td><td>Anteil „stimme eher zu“ + „stimme voll und ganz zu“ je Aussage <code>G02Q03[…]</code></td><td>Antworten auf diese Aussage</td></tr>
+          <tr><td>Ohne Angabe</td><td>Fehlende Antwort auf die jeweilige Frage. Bleibt im Datensatz, wird aber keiner Kategorie zugerechnet und nicht als eigene Kategorie angezeigt.</td><td>nicht im Nenner</td></tr>
+          <tr><td>Veränderung</td><td>Differenz zum vorhergehenden Zeitraum gleicher Länge; Anteile in Prozentpunkten (Pp.)</td><td>wie oben, je Zeitraum</td></tr>
+          <tr><td>Wenige Antworten</td><td>Hinweis unter ${MIN_N_RELIABLE} Antworten; unter ${MIN_N_SHOW} Antworten keine Werte</td><td>–</td></tr>
         </tbody>
       </table>
-      <p class="muted">Prozentwerte werden so gerundet, dass eine Verteilung genau 100 % ergibt und Gruppen (z. B. 4 + 5 Sterne) der Summe der Einzelwerte entsprechen. Fehlende Antworten werden nie als 0 Sterne gezählt. Zusammenhänge zwischen Werten sind keine nachgewiesenen Ursachen.</p>
+      <p class="muted">Prozentwerte werden so gerundet, dass eine Verteilung genau 100 % ergibt und Gruppen (z. B. 4 + 5 Sterne) der Summe der Einzelwerte entsprechen.</p>
     </section>
 
     <section class="card">
       <h3 class="card-title">Fragen und Kurzbezeichnungen</h3>
-      <table><thead><tr><th scope="col">Feldcode</th><th scope="col">Kurzbezeichnung im Dashboard</th><th scope="col">Fragetext</th></tr></thead>
+      <table><thead><tr><th scope="col">Feldcode</th><th scope="col">Im Dashboard</th><th scope="col">Fragetext</th></tr></thead>
       <tbody>
         <tr><td><code>Q00</code></td><td>Online-Service</td><td>${esc(QUESTION_TEXT.Q00)}</td></tr>
-        <tr><td><code>G01Q02</code></td><td>Gesamtzufriedenheit (Sterne)</td><td>${esc(QUESTION_TEXT.G01Q02)}</td></tr>
+        <tr><td><code>G01Q02</code></td><td>Gesamtzufriedenheit</td><td>${esc(QUESTION_TEXT.G01Q02)}</td></tr>
         ${ITEMS.map((i) => `<tr><td><code>${esc(i.field)}</code></td><td>${esc(i.label)}</td><td>${esc(i.text)}</td></tr>`).join("")}
         <tr><td><code>G01Q04</code></td><td>Textfeedback: Kritik</td><td>${esc(QUESTION_TEXT.G01Q04)}</td></tr>
         <tr><td><code>G01Q05</code></td><td>Textfeedback: Lob</td><td>${esc(QUESTION_TEXT.G01Q05)}</td></tr>
       </tbody></table>
-      <p class="muted">Die Kurzbezeichnungen sind aus dem Fragetext abgeleitet und noch fachlich zu bestätigen.</p>
     </section>
 
     <section class="card">
-      <h3 class="card-title">Zuordnung Online-Service → Dienststelle <span class="flag">Beispiel</span></h3>
+      <h3 class="card-title">Zuordnung Service → Dienststelle <span class="flag">Beispiel</span></h3>
       <table><thead><tr><th scope="col">Dienststelle</th><th scope="col">Online-Services</th></tr></thead>
       <tbody>${CATALOG.map((c) => `<tr><td>${esc(c.office)}</td><td>${c.services.map(esc).join(", ")}</td></tr>`).join("")}</tbody></table>
     </section>
 
     <section class="card" id="themen">
-      <h3 class="card-title">Themen und Stichwörter (Verbesserungspotenziale)</h3>
+      <h3 class="card-title">Themen und Stichwörter</h3>
       <table><thead><tr><th scope="col">Thema</th><th scope="col">Stichwörter (Teilwort, Groß-/Kleinschreibung egal)</th></tr></thead>
       <tbody>${THEMES.map((t) => `<tr><td>${esc(t.label)}</td><td>${t.keywords.map(esc).join(", ")}</td></tr>`).join("")}</tbody></table>
     </section>
 
     <section class="card">
-      <h3 class="card-title">Export der aktuellen Filterung</h3>
-      <p>Zeitraum ${esc(st.period.rangeText)}, ${st.office === "Alle" ? "alle Dienststellen" : esc(st.office)}${st.service !== "Alle" ? `, ${esc(st.service)}` : ""}: <b>${fmtInt(baseFilter(st, st.period).length)}</b> Rückmeldungen.</p>
-      <div class="export-actions">
-        <button class="btn" data-action="export-csv">CSV herunterladen</button>
-      </div>
+      <h3 class="card-title">Export</h3>
+      <p>Aktuelle Filterung: <b>${fmtInt(baseFilter(st, st.period).length)}</b> Rückmeldungen.</p>
+      <button type="button" class="btn" data-action="export-csv">CSV herunterladen</button>
     </section>`;
 }
 
-/* ---------------- Detailansicht (Modal) ---------------- */
+/* ---------------- Detailansicht (Dialog) ---------------- */
 
 function openDetail(id) {
   const r = DATA.records.find((x) => x.id === id);
   if (!r) return;
   const items = ITEMS.map((it) => {
     const v = r.items[it.code];
-    return `<tr>
-      <th scope="row">${esc(it.label)}<br><small class="muted">${esc(it.text)}</small></th>
-      <td>${
-        v == null
-          ? `<span class="muted">keine Angabe</span>`
-          : `<span class="cat-chip" style="background:${SCALE_COLORS[v]};color:${SCALE_TEXT_ON[v]}">${v}</span> ${esc(AGREE_SCALE.labels[v])}`
-      }</td>
-    </tr>`;
+    return `<tr><th scope="row">${esc(it.label)}<br><small class="muted">${esc(it.text)}</small></th>
+      <td>${v == null ? `<span class="muted">keine Angabe</span>` : `<span class="cat-chip" style="background:${SCALE_COLORS[v]};color:${SCALE_TEXT_ON[v]}">${v}</span> ${esc(AGREE_SCALE.labels[v])}`}</td></tr>`;
   }).join("");
   const grp = r.stars == null ? null : Object.values(STAR_SCALE.groups).find((g) => g.values.includes(r.stars));
+  const textBox = (txt) => (txt ? `<div class="comment-box">${esc(txt)}</div>` : `<div class="comment-box empty-box">Kein Text (nicht beantwortet oder Frage nicht angezeigt).</div>`);
   openModal(
     `Rückmeldung vom ${fmtDate(r.date)}`,
     `<dl class="kv">
       <dt>Online-Service</dt><dd>${esc(r.service || "–")}</dd>
       <dt>Dienststelle</dt><dd>${esc(r.office)}</dd>
-      <dt>Abgegeben am</dt><dd>${fmtDate(r.submitted)}</dd>
-      <dt>Antwort-ID</dt><dd>${esc(r.id)}</dd>
+      <dt>Gesamtzufriedenheit</dt><dd>${starsExact(r.stars)} ${r.stars != null ? `${r.stars} von 5 · ${esc(grp.label)}` : ""}</dd>
     </dl>
-    <section class="detail-sec">
-      <h3 class="card-title">Bewertung</h3>
-      <p><b>Gesamtzufriedenheit:</b> ${starsExact(r.stars)} ${r.stars != null ? `${r.stars} von 5 · ${esc(grp.label)}` : ""}</p>
-      <table class="detail-items"><tbody>${items}</tbody></table>
-    </section>
-    <section class="detail-sec">
-      <h3 class="card-title">Textfeedback derselben Rückmeldung</h3>
-      <p class="muted">Kritik – „${esc(QUESTION_TEXT.G01Q04)}“</p>
-      <div class="comment-box ${r.textNegative ? "neg" : "empty-box"}">${r.textNegative ? esc(r.textNegative) : "Kein Text (nicht beantwortet oder Frage nicht angezeigt)."}</div>
-      <p class="muted">Lob – „${esc(QUESTION_TEXT.G01Q05)}“</p>
-      <div class="comment-box ${r.textPositive ? "pos" : "empty-box"}">${r.textPositive ? esc(r.textPositive) : "Kein Text (nicht beantwortet oder Frage nicht angezeigt)."}</div>
-    </section>`
+    <section class="detail-sec"><h3 class="card-title">Lob</h3>${textBox(r.textPositive)}</section>
+    <section class="detail-sec"><h3 class="card-title">Kritik</h3>${textBox(r.textNegative)}</section>
+    <section class="detail-sec"><h3 class="card-title">Detailbewertungen</h3><table class="detail-items"><tbody>${items}</tbody></table></section>`
   );
 }
 
@@ -1020,6 +809,14 @@ function closeModal() {
   if (ui.lastFocus && document.contains(ui.lastFocus)) ui.lastFocus.focus();
 }
 
+function closeInfos(except = null) {
+  $$(".info-btn[aria-expanded='true']").forEach((b) => {
+    if (b === except) return;
+    b.setAttribute("aria-expanded", "false");
+    document.getElementById(b.getAttribute("aria-controls")).hidden = true;
+  });
+}
+
 function toast(msg) {
   const el = document.createElement("div");
   el.className = "toast";
@@ -1028,42 +825,36 @@ function toast(msg) {
   setTimeout(() => el.remove(), 7000);
 }
 
-/* ---------------- Globale Filterleiste ---------------- */
+/* ---------------- Globale Filter ---------------- */
 
 function renderFilters(st) {
   const role = currentRole();
-  $("#filter-period").innerHTML = DATA.periods.map((p) => `<option value="${p.id}" ${p.id === st.period.id ? "selected" : ""}>${esc(p.label)}</option>`).join("");
+  const period = $("#filter-period");
+  period.innerHTML = DATA.periods.map((p) => `<option value="${p.id}" ${p.id === st.period.id ? "selected" : ""}>${esc(p.label)}</option>`).join("");
+  period.classList.toggle("is-set", st.period.id !== DATA.periods[0].id);
+
   const offices = allowedOffices();
   const officeSel = $("#filter-office");
-  officeSel.innerHTML = (role.offices ? [] : [`<option value="Alle">Alle Dienststellen</option>`])
-    .concat(offices.map((o) => `<option ${o === st.office ? "selected" : ""}>${esc(o)}</option>`))
-    .join("");
+  officeSel.innerHTML = (role.offices ? [] : [`<option value="Alle">Alle Dienststellen</option>`]).concat(offices.map((o) => `<option ${o === st.office ? "selected" : ""}>${esc(o)}</option>`)).join("");
   officeSel.disabled = !!role.offices;
   officeSel.title = role.offices ? "Durch die Demo-Rolle festgelegt" : "";
+  officeSel.classList.toggle("is-set", st.office !== "Alle" && !role.offices);
+
   const groups = CATALOG.filter((c) => (st.office === "Alle" ? offices.includes(c.office) : c.office === st.office));
-  $("#filter-service").innerHTML =
-    `<option value="Alle">${st.office === "Alle" ? "Alle Services" : `Alle Services (${esc(st.office)})`}</option>` +
-    groups
-      .map((g) => `<optgroup label="${esc(g.office)}">${g.services.map((s) => `<option ${s === st.service ? "selected" : ""}>${esc(s)}</option>`).join("")}</optgroup>`)
-      .join("");
+  const svcSel = $("#filter-service");
+  svcSel.innerHTML =
+    `<option value="Alle">Alle Services</option>` +
+    groups.map((g) => `<optgroup label="${esc(g.office)}">${g.services.map((s) => `<option ${s === st.service ? "selected" : ""}>${esc(s)}</option>`).join("")}</optgroup>`).join("");
+  svcSel.classList.toggle("is-set", st.service !== "Alle");
+
+  $("#reset-filters").hidden = isDefaultGlobal(st);
   $("#updated-at").textContent = DATA.lastUpdated;
-
-  const chips = [];
-  if (st.office !== "Alle" && !role.offices) chips.push(`<span class="fchip">Dienststelle: ${esc(st.office)} <button data-action="clear-filter" data-key="dienststelle" aria-label="Filter Dienststelle entfernen">×</button></span>`);
-  if (role.offices) chips.push(`<span class="fchip locked">Dienststelle: ${esc(st.office)} <small>(Demo-Rolle)</small></span>`);
-  if (st.service !== "Alle") chips.push(`<span class="fchip">Service: ${esc(st.service)} <button data-action="clear-filter" data-key="service" aria-label="Filter Service entfernen">×</button></span>`);
-  const nonDefault = st.period.id !== DATA.periods[0].id || chips.some((c) => !c.includes("locked"));
-  if (st.period.id !== DATA.periods[0].id) chips.unshift(`<span class="fchip">Zeitraum: ${esc(st.period.rangeText)} <button data-action="clear-filter" data-key="zeitraum" aria-label="Zeitraum zurücksetzen">×</button></span>`);
-  $("#active-filters").innerHTML = chips.length
-    ? `<span class="af-label">Aktive Filter (gelten im ganzen Dashboard):</span> ${chips.join("")} ${nonDefault ? `<button class="btn-mini" data-action="reset-filters">Alle Filter zurücksetzen</button>` : ""}`
-    : `<span class="af-label">Keine zusätzlichen Filter – Zeitraum: ${esc(st.period.rangeText)}, alle Dienststellen und Services.</span>`;
-
   $("#demo-role").innerHTML = DEMO_ROLES.map((r) => `<option value="${esc(r.id)}" ${r.id === role.id ? "selected" : ""}>${esc(r.label)}</option>`).join("");
-  $("#data-source").innerHTML = DATA.source === "sample" ? "Beispieldaten (fiktiv)" : `Import: ${esc(DATA.fileName)}`;
 }
 
 /* ---------------- Rendern ---------------- */
 
+let lastView = "";
 let lastViewKey = "";
 
 function render() {
@@ -1071,12 +862,16 @@ function render() {
   const viewKey = st.view + JSON.stringify(st.params);
   if (viewKey !== lastViewKey) {
     ui.tablePage = 1;
-    if (!lastViewKey.startsWith(st.view)) ui.textSearch = "";
+    ui.textPages = { lob: 1, kritik: 1 };
   }
+  if (st.view !== lastView) ui.textSearch = "";
   lastViewKey = viewKey;
+  lastView = st.view;
+  infoSeq = 0;
   renderFilters(st);
+  const navView = st.view === "einzelbewertungen" ? "bewertungen" : st.view;
   $$(".nav-item").forEach((a) => {
-    const active = a.dataset.view === st.view || (st.view === "rueckmeldungen" && a.dataset.view === st.params.zurueck);
+    const active = a.dataset.view === navView;
     a.classList.toggle("is-active", active);
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
@@ -1084,7 +879,7 @@ function render() {
   });
   $(".brand a").href = href("start");
   $(".mobile-logo-link").href = href("start");
-  const views = { start: viewStart, bewertungen: viewRatings, textfeedback: viewTexts, services: viewServices, rueckmeldungen: viewResponses, daten: viewData };
+  const views = { start: viewStart, bewertungen: viewRatings, einzelbewertungen: viewSingle, textfeedback: viewTexts, services: viewServices, daten: viewData };
   const root = $("#view-root");
   try {
     root.innerHTML = views[st.view](st);
@@ -1095,31 +890,12 @@ function render() {
   document.title = `${VIEWS[st.view]} · Bürgerfeedback Online-Services · Prototyp`;
 }
 
-function updateParams(changes, { resetLocal = false } = {}) {
+function updateParams(changes) {
   const { view, params } = parseHash();
-  let next = { ...params, ...changes };
-  if (resetLocal) next = Object.fromEntries(Object.entries(next).filter(([k]) => GLOBAL_KEYS.includes(k)));
-  location.hash = buildHash(view, next);
+  location.hash = buildHash(view, { ...params, ...changes });
 }
 
 /* ---------------- Ereignisse ---------------- */
-
-function moveTile(id, dir) {
-  const layout = loadLayout();
-  const i = layout.findIndex((t) => t.id === id);
-  const j = i + dir;
-  if (j < 0 || j >= layout.length) return;
-  [layout[i], layout[j]] = [layout[j], layout[i]];
-  saveLayout(layout);
-  render();
-  const btn = $(`[data-action="tile-move"][data-id="${id}"][data-dir="${dir}"]`) || $(`[data-action="tile-move"][data-id="${id}"]:not([disabled])`);
-  btn?.focus();
-  announce(`${TILES[id].title} ist jetzt an Position ${j + 1} von ${layout.length}.`);
-}
-
-function announce(msg) {
-  $("#sr-status").textContent = msg;
-}
 
 function exportCsv() {
   const st = getState();
@@ -1169,9 +945,7 @@ function bind() {
   window.addEventListener("hashchange", () => {
     closeModal();
     render();
-    if (!location.hash.includes("#definitionen") && !location.hash.includes("#themen")) {
-      $("#view-root").scrollIntoView ? window.scrollTo({ top: 0 }) : null;
-    }
+    window.scrollTo({ top: 0 });
   });
 
   $("#filter-period").addEventListener("change", (e) => updateParams({ zeitraum: e.target.value }));
@@ -1181,15 +955,21 @@ function bind() {
     const changes = { dienststelle: office };
     if (params.service && office !== "Alle" && SERVICE_TO_OFFICE[params.service] !== office) {
       changes.service = "";
-      toast(`Service-Auswahl „${params.service}“ zurückgesetzt, weil der Service nicht zur Dienststelle „${office}“ gehört.`);
+      toast(`Service „${params.service}“ zurückgesetzt, weil er nicht zur Dienststelle „${office}“ gehört.`);
     }
     updateParams(changes);
   });
   $("#filter-service").addEventListener("change", (e) => updateParams({ service: e.target.value }));
+  $("#reset-filters").addEventListener("click", () => {
+    const { view, params } = parseHash();
+    const local = Object.fromEntries(Object.entries(params).filter(([k]) => !GLOBAL_KEYS.includes(k)));
+    location.hash = buildHash(view, local);
+    toast("Zeitraum, Dienststelle und Service zurückgesetzt.");
+  });
   $("#demo-role").addEventListener("change", (e) => {
     localStorage.setItem(ROLE_KEY, e.target.value);
     const role = currentRole();
-    toast(role.offices ? `Demo-Rolle gewechselt: Es werden nur Daten der Dienststelle „${role.offices[0]}“ angezeigt.` : "Demo-Rolle gewechselt: Zentrale Gesamtansicht aller Dienststellen.");
+    toast(role.offices ? `Demo-Rolle: nur Daten der Dienststelle „${role.offices[0]}“.` : "Demo-Rolle: zentrale Gesamtansicht.");
     const { view, params } = parseHash();
     const next = { ...params };
     if (!role.offices) delete next.dienststelle;
@@ -1199,35 +979,42 @@ function bind() {
 
   document.addEventListener("click", (e) => {
     const el = e.target.closest("[data-action]");
-    if (!el || el.tagName === "SELECT") return;
+    if (!el || el.tagName === "SELECT") {
+      if (!e.target.closest(".info-pop")) closeInfos();
+      return;
+    }
     const a = el.dataset.action;
     const { params } = parseHash();
+    if (a === "info") {
+      e.preventDefault();
+      const open = el.getAttribute("aria-expanded") === "true";
+      closeInfos(el);
+      el.setAttribute("aria-expanded", String(!open));
+      document.getElementById(el.getAttribute("aria-controls")).hidden = open;
+      return;
+    }
+    closeInfos();
     if (a === "detail") openDetail(el.dataset.id);
     else if (a === "toggle-star") {
       const cur = params.sterne ? params.sterne.split(",") : [];
       const s = el.dataset.star;
       const next = cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s];
       updateParams({ sterne: next.sort().join(",") });
-    } else if (a === "rf-reset") updateParams({ sterne: "", aussage: "", kategorie: "" });
-    else if (a === "clear-filter") {
-      updateParams({ [el.dataset.key]: "" });
-    } else if (a === "reset-filters") {
-      const { view } = parseHash();
-      location.hash = buildHash(view, {});
-      toast("Alle globalen Filter wurden zurückgesetzt.");
-    } else if (a === "toggle-customize") {
-      ui.customize = !ui.customize;
-      render();
-      $('[data-action="toggle-customize"]')?.focus();
-    } else if (a === "reset-layout") {
-      localStorage.removeItem(LAYOUT_KEY);
-      render();
-      announce("Standardansicht wiederhergestellt.");
-      toast("Standardansicht der Kacheln wiederhergestellt.");
-    } else if (a === "tile-move") moveTile(el.dataset.id, Number(el.dataset.dir));
-    else if (a === "more-rows") {
+    } else if (a === "toggle-agree") {
+      const same = params.aussage === el.dataset.item && params.wert === el.dataset.value;
+      updateParams(same ? { aussage: "", wert: "" } : { aussage: el.dataset.item, wert: el.dataset.value });
+    } else if (a === "clear-local") {
+      updateParams(Object.fromEntries(el.dataset.keys.split(",").map((k) => [k, ""])));
+    } else if (a === "reset-text") {
+      ui.textSearch = "";
+      if (params.sterne || params.thema) updateParams({ sterne: "", thema: "" });
+      else render();
+    } else if (a === "more-rows") {
       ui.tablePage += 1;
       render();
+    } else if (a === "more-text") {
+      ui.textPages[el.dataset.key] += 1;
+      rerenderTexts();
     } else if (a === "export-csv") exportCsv();
     else if (a === "use-sample") {
       DATA.records = SAMPLE_RECORDS;
@@ -1242,62 +1029,14 @@ function bind() {
   document.addEventListener("change", (e) => {
     const el = e.target;
     if (el.id === "csv-input" && el.files[0]) return handleImport(el.files[0]);
-    const a = el.dataset.action;
-    if (a === "tile-size") {
-      const layout = loadLayout();
-      layout.find((t) => t.id === el.dataset.id).size = el.value;
-      saveLayout(layout);
-      render();
-      $(`[data-action="tile-size"][data-id="${el.dataset.id}"]`)?.focus();
-    } else if (a === "rf-item") updateParams({ aussage: el.value, kategorie: el.value ? parseHash().params.kategorie || "positive" : "" });
-    else if (a === "rf-cat") updateParams({ kategorie: el.value });
-    else if (a === "svc-sort") updateParams({ sortierung: el.value });
+    if (el.dataset.action === "svc-sort") updateParams({ sortierung: el.value });
   });
 
   document.addEventListener("input", (e) => {
     if (e.target.id !== "text-search") return;
     ui.textSearch = e.target.value;
-    ui.tablePage = 1;
-    const st = getState();
-    // Nur die Ergebnisliste neu zeichnen, damit der Fokus im Suchfeld bleibt.
-    const tmp = document.createElement("div");
-    tmp.innerHTML = viewTexts(st);
-    $("#text-results").innerHTML = $("#text-results", tmp).innerHTML;
-  });
-
-  /* Drag & Drop der Kacheln (Alternative: Schaltflächen „Nach vorne/hinten“) */
-  document.addEventListener("dragstart", (e) => {
-    const tile = e.target.closest?.(".tile");
-    if (!tile || !ui.customize) return;
-    ui.dragId = tile.dataset.tile;
-    tile.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", ui.dragId);
-  });
-  document.addEventListener("dragover", (e) => {
-    const tile = e.target.closest?.(".tile");
-    if (!tile || !ui.dragId) return;
-    e.preventDefault();
-    $$(".tile.drop-target").forEach((t) => t.classList.remove("drop-target"));
-    if (tile.dataset.tile !== ui.dragId) tile.classList.add("drop-target");
-  });
-  document.addEventListener("drop", (e) => {
-    const tile = e.target.closest?.(".tile");
-    if (!tile || !ui.dragId) return;
-    e.preventDefault();
-    const layout = loadLayout();
-    const from = layout.findIndex((t) => t.id === ui.dragId);
-    const to = layout.findIndex((t) => t.id === tile.dataset.tile);
-    const [moved] = layout.splice(from, 1);
-    layout.splice(to, 0, moved);
-    saveLayout(layout);
-    ui.dragId = null;
-    render();
-    announce(`${TILES[moved.id].title} verschoben.`);
-  });
-  document.addEventListener("dragend", () => {
-    ui.dragId = null;
-    $$(".tile").forEach((t) => t.classList.remove("dragging", "drop-target"));
+    ui.textPages = { lob: 1, kritik: 1 };
+    rerenderTexts();
   });
 
   $("#info-btn").addEventListener("click", () =>
@@ -1305,12 +1044,11 @@ function bind() {
       "Hinweise zum Dashboard",
       `<ul class="help-list">
         <li><b>Zweck:</b> Rückmeldungen zu Online-Services auswerten, um Services zu verbessern und Gutes sichtbar zu machen. Es werden Services bewertet, keine Personen.</li>
-        <li><b>Globale Filter</b> (Zeitraum, Dienststelle, Service) oben gelten auf allen Seiten und bleiben beim Seitenwechsel erhalten.</li>
-        <li><b>Bereichsfilter</b> (z. B. Sterne unter „Bewertungen“) gelten nur im jeweiligen Bereich.</li>
-        <li><b>Bewertungen</b> = Sterne und Zustimmungsskalen. <b>Textfeedback</b> = offene Kommentare.</li>
-        <li>Karten, Balken, Themen und Services sind anklickbar und führen zu den zugrunde liegenden Rückmeldungen. Das Logo führt zurück zur Übersicht.</li>
-        <li><b>Demo-Rolle</b> (Seitenleiste) simuliert Zugriffsrechte einer Dienststelle. Es gibt keine echte Anmeldung.</li>
-        <li>Das Feedback ist freiwillig und nicht repräsentativ für alle Bürgerinnen und Bürger.</li>
+        <li><b>Filter oben</b> (Zeitraum, Dienststelle, Service) gelten auf allen Seiten.</li>
+        <li><b>Bewertungsübersicht:</b> Sterne und Zustimmung zu fünf Aussagen. Ein Klick auf einen Balken oder eine Säule filtert nach dieser Antwort.</li>
+        <li><b>Textfeedback:</b> offene Kommentare, getrennt nach Lob und Kritik.</li>
+        <li><b>i-Symbole</b> öffnen kurze Erläuterungen. Das Logo führt zur Übersicht.</li>
+        <li><b>Demo-Rolle</b> (Seitenleiste) simuliert Zugriffsrechte einer Dienststelle – keine echte Anmeldung.</li>
       </ul>
       <p><a href="#/daten">Definitionen und Methodik</a></p>`
     )
@@ -1320,10 +1058,18 @@ function bind() {
     if (e.target.id === "modal") closeModal();
   });
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const openInfo = $(".info-btn[aria-expanded='true']");
+      if (openInfo) {
+        closeInfos();
+        openInfo.focus();
+        return;
+      }
+    }
     if ($("#modal").hidden) return;
     if (e.key === "Escape") closeModal();
     if (e.key === "Tab") {
-      const f = $$("#modal button, #modal a[href], #modal summary, #modal select, #modal input").filter((x) => x.offsetParent !== null);
+      const f = $$("#modal button, #modal a[href], #modal select, #modal input").filter((x) => x.offsetParent !== null);
       if (!f.length) return;
       const first = f[0];
       const last = f[f.length - 1];
@@ -1336,6 +1082,19 @@ function bind() {
       }
     }
   });
+}
+
+/* Nur die Kommentarspalten neu zeichnen (Fokus im Suchfeld bleibt erhalten). */
+function rerenderTexts() {
+  const st = getState();
+  const base = baseFilter(st, st.period);
+  const f = textFilters(st.params);
+  infoSeq = 1000;
+  $("#text-results").innerHTML = textColumns(base, f);
+  const active = f.stars.length || f.theme || ui.textSearch.trim();
+  const line = $(".text-filter-line");
+  if (line && !line.querySelector('[data-action="reset-text"]') && active) line.insertAdjacentHTML("beforeend", `<button type="button" class="btn-link" data-action="reset-text">Filter zurücksetzen</button>`);
+  if (line && !active) line.querySelector('[data-action="reset-text"]')?.remove();
 }
 
 bind();
